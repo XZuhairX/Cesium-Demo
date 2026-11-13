@@ -1,0 +1,1796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Moving I-4 Forward Project 3 | 3D Viewer</title>
+  <!-- CesiumJS 1.147, the version in the CesiumJS Quickstart (cesium.com/learn/cesiumjs-learn/cesiumjs-quickstart) -->
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.147/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.147/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: #000; }
+    #cesiumContainer { position: absolute; inset: 0; }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <script type="module">
+// =====================================================================
+//  MOVING I-4 FORWARD PROJECT 3  ·  Sandcastle viewer
+//  Designed by the RS&H Infrastructure Digital Delivery team
+//
+//  What it does
+//   - Loads your iModel "Cesium Container" (3D Tiles 6143512, database 6140816)
+//   - FILES panel: every synced file with an on/off switch and its DGN levels;
+//     click a file's colour square to pick its colour (Colour by file)
+//   - X-ray: off / on / close up only, plus a ground opacity slider
+//   - Go underground at a spot you click, then "Back up" to return
+//   - Clip ground: cuts the map/terrain under the model footprint (Clipping
+//     assist 6143638) and keeps the grass inside the loops. Starts off.
+//   - Cross-section: Place cut, Cut across road (square to the road), Face
+//     camera, Section only, Rotate / Slide / thickness, optional soil fill
+//   - SECTION WINDOW: a flat wireframe view of the cut on black (like ORD's
+//     cross-section viewer), Left/Right widths, ground line, grid with offsets
+//     and elevations, Layers panel, and Horizontal / Vertical / Slope measuring
+//     that snaps to nearby lines
+//   - Wider click target so thin lines (alignments) are easy to hit
+//   - "How?" buttons that explain every group, and a written banner telling you
+//     what to click whenever a tool is waiting for a click
+//   - Click-to-learn with depth of cover, hover labels, orbit, saved views, WASD
+//   - RS&H logo in the corner, auto-recovery if Cesium ever stops drawing, and an
+//     on-screen log so any failure says why
+//
+//  Paste the whole thing into Sandcastle's JavaScript tab and press Run.
+//  Sources: cesium.com/learn/bim-cad (model tree, tileset metadata, Asset
+//  Elements API); cesium.com "Hide regions of 3D Tiles or terrain with clipping
+//  polygons"; CesiumJS ClippingPolygonCollection, ClippingPlaneCollection,
+//  GlobeTranslucency, Camera, PerspectiveFrustum, Scene.pick (width/height),
+//  Cesium3DTileset (enableDebugWireframe / debugWireframe) and
+//  ScreenSpaceCameraController references.
+// =====================================================================
+
+// ---------------- SECTION 1 · SETTINGS ----------------
+// Your Cesium ion token (ion > Access Tokens). This must be the READ ONLY token
+// with assets 6143512 + 6140816 + 6143638 (plus terrain + imagery) selected.
+const ION_TOKEN ="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6Im5wZkxQQ29CbXVKM3czeXoiLCJqdGkiOiI2NmRjMzkyZi04NjM0LTQyNjAtODNjOS1jNjlmNDgzMjczYTUiLCJpZCI6NTM1OTg5LCJzdWIiOiJadWhhaXIuQWxtYWdocmFiaSIsImlzcyI6Imh0dHBzOi8vYXBpLmNlc2l1bS5jb20iLCJhdWQiOiJSRUFEIE9OTFkiLCJpYXQiOjE3OTQ0MjEyNDl9.rnMDXVIBdWLakpEIo1r9vllcoH1eE-aq-ZeZzLVuaAw";
+
+const TILESET_ASSET_ID = 6143512;   // 3D Tiles mesh, all files (new import, Nov 11)
+const DATABASE_ASSET_ID = 6140816;  // BIM/CAD Database (backup for click-to-learn)
+const CLIP_ASSET_ID = 6143638;      // Clipping assist footprint (GeoJSON) made from 6143512
+const PROJECT_NAME = "Moving I-4 Forward Project 3";
+const TEAM_CREDIT = "Designed by the RS&H Infrastructure Digital Delivery team";
+const HEIGHT_NUDGE_METERS = 0;      // + lifts the model, - lowers it
+const GROUND_START_PERCENT = 35;    // ground opacity when X-ray turns on
+const XRAY_CLOSE_METERS = 150;      // "close up only": see-through within this distance, solid by 2x
+const WALK_SPEED_MPS = 25;          // WASD speed in meters/second (hold Shift = 5x)
+const LOOK_SPEED_DEG = 45;          // arrow-key turning speed, degrees/second
+const CLIP_GROUND_ON_START = false; // Clip ground starts off; people turn it on
+const KEEP_FOOTPRINT_HOLES = true;  // keep the grass inside loops (false = cut the whole outline)
+const UNDERGROUND_DEPTH_M = 8;      // Go underground: how far below the ground you end up
+const UNDERGROUND_BACKOFF_M = 30;   // ...and how far back from the spot you clicked
+const CUT_SLIDE_METERS = 300;       // how far the cut can slide each way
+const SLICE_START_METERS = 4;       // "Section only" strip thickness (main view + section window)
+const CUT_LEFT_FT = 100;            // cut width left of the cut point (feet) — change in the panel
+const CUT_RIGHT_FT = 100;           // cut width right of the cut point (feet)
+const SOIL_FILL_ON_START = false;   // soil fill starts off
+const SOIL_DEPTH_METERS = 30;       // how deep the soil fill goes below the ground line
+const SOIL_COLOR = "#7A5A3A";       // soil fill colour
+const ORBIT_SPEED = 0.0025;         // radians per frame
+const PICK_RADIUS_PX = 8;          // clicks search this many pixels around the mouse (thin lines are easier to hit)
+const SECTION_STRIP_METERS = 3.1;  // section window strip depth (just over the 10 ft template-drop spacing, so one set of cross lines is always inside)
+const ELEVATION_OFFSET_FT = 0;     // added to grid elevations. Cesium heights are ellipsoid heights; to read NAVD88 like ORD,
+                                   // set this to (ORD elevation − grid elevation) at any point you know (around +95 to +100 ft in central FL)
+const GRID_TARGET_PX = 80;         // section grid: roughly how many pixels between grid lines
+
+
+// Saved views: fly somewhere, click "+ Copy this view", then paste the line from
+// the log into this list and rename it. Empty is fine.
+const SAVED_VIEWS = [
+  // { name: "Bridge", destination: [x, y, z], hpr: [heading, pitch, roll] },
+];
+
+// RS&H brand palette (from the internal "AI Prompt - Color" doc)
+const RSH = {
+  blue: "#215EAC", navy: "#103254", golden: "#FEBC11", plum: "#A1225D",
+  green: "#0BA89C", lightBlue: "#85C7EE", lightBlueTint: "#D7EAF9",
+  darkGray: "#415465", lightGray: "#A8A6A8", lightGrayTint: "#E0E0E3",
+};
+const FILE_COLORS = [RSH.golden, RSH.plum, RSH.green, RSH.lightBlue, RSH.blue, RSH.darkGray, "#E07A2E", "#6C4BB4"];
+const RSH_LOGO = "data:image/png;base64,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";  // RS&H logo, embedded (transparent PNG)
+
+// What the "i" buttons say
+const INFO = {
+  ground:
+    "<b>X-ray</b> – click to change mode. <i>Off</i>: solid ground. <i>On</i>: the whole ground turns see-through. " +
+    `<i>Close up only</i>: the ground is see-through only within about ${XRAY_CLOSE_METERS} m of you and stays solid farther away.<br>` +
+    "<b>Go underground</b> – click it, then click the spot you want to go under. You drop below the ground there. " +
+    "The button then becomes <b>Back up</b>, which takes you back to where you were.<br>" +
+    "<b>Ground opacity</b> – how solid the ground is while X-ray is on (0% = invisible, 100% = solid).",
+  clip:
+    "<b>Clip ground</b> – cuts the map and terrain away under the model, so the old ground and satellite photo don't " +
+    "poke through your road. The grass inside the interchange loops is kept. Click again to bring the ground back.",
+  cut:
+    "<b>Place cut</b> – click it, then click a point on the model. A vertical cut goes through that point, facing the way you're looking.<br>" +
+    "<b>Remove cut</b> – turns the cut off and closes the section window.<br>" +
+    "<b>Cut across road</b> – click it, then click two points along the road (one behind the other, the way cars drive — on the alignment or the road surface). The cut goes through the second point, straight across the road (like an ORD cross-section). Slide then steps it along the road.<br>" +
+    "<b>Face camera</b> – turns the cut to face the way you're looking.<br>" +
+    "<b>Section only</b> – <i>off</i>: everything in front of the cut is hidden. <i>on</i>: only a thin strip at the cut is kept (set its width with Thickness).<br>" +
+    "<b>Soil fill</b> – paints the cut face brown below the ground line instead of black.<br>" +
+    "<b>Section window</b> – opens a flat, straight-on view of the cut with measuring tools.<br>" +
+    "<b>Rotate</b> – spins the cut around the point. <b>Slide</b> – moves it forward/back (like stepping through stations). " +
+    "<b>Thickness</b> – width of the strip in Section only.<br>" +
+    "<b>Left / Right width</b> – how far the section goes each side of the cut point, in feet (type a number or drag). The section window and Fit follow it.",
+  view:
+    "<b>Colour by file</b> – gives each file its own colour. Click a file's colour square in Files to choose the colour.<br>" +
+    "<b>Orbit</b> – circles whatever is in the middle of your screen, at your current distance. Click again (or walk) to stop.<br>" +
+    "<b>Hover labels</b> – shows the file and level of whatever is under your mouse.",
+  views:
+    "<b>Overview</b> – flies back to the whole project.<br>" +
+    "<b>+ Copy this view</b> – adds a button for where you are now and copies a line you can paste into SAVED_VIEWS (Section 1) to keep it.",
+  move:
+    "Click the map first, then use <b>W A S D</b> to walk, <b>Q</b>/<b>E</b> to go down/up, arrow keys to look around. Hold <b>Shift</b> to go 5x faster. " +
+    "<b>Esc</b> cancels any tool that is waiting for a click.",
+  files:
+    "Each file has a checkbox (whole file on/off) and its levels underneath. <b>Ctrl+click</b> a level to show only that level in that file " +
+    "(Ctrl+click again for all). Click the <b>colour square</b> to pick that file's colour. Search finds levels by name.",
+  section:
+    "The model is shown as <b>wireframe</b> inside a thin strip at the cut; the <span style=\"color:#0BA89C\">green line</span> is the ground (Cesium World Terrain). The grid shows offset (ft) along the bottom and elevation (ft) up the side.<br>" +
+    "<b>Horizontal</b> – click two points: horizontal distance only.<br><b>Vertical</b> – click two points: height difference only.<br>" +
+    "<b>Slope</b> – click two points: slope in % and as a ratio (H:V).<br><b>Clear</b> – removes the measurements.<br>" +
+    "Measuring <b>snaps</b>: a gold ring shows the nearest line under your mouse; click to use it.<br>" +
+    "<b>Layers</b> – turn files, the ground line, the solid ground, the grid and measurements on/off in this window only, and set the strip depth.<br>" +
+    "<b>Fit</b> – zooms to your Left/Right width. Scroll to zoom, drag to move around. Drag the blue bar to move the window; drag the bottom-right corner to resize it.",
+};
+
+// ---------------- SECTION 2 · PANEL (frosted white, RS&H brand) ----------------
+const css = document.createElement("style");
+css.textContent = `
+#mi4{position:absolute;top:10px;left:10px;width:320px;max-height:calc(100% - 20px);display:flex;flex-direction:column;
+background:rgba(255,255,255,.84);backdrop-filter:blur(14px) saturate(1.3);-webkit-backdrop-filter:blur(14px) saturate(1.3);
+border:1px solid rgba(33,94,172,.22);border-radius:14px;box-shadow:0 10px 30px rgba(16,50,84,.22),inset 0 1px 0 rgba(255,255,255,.9);
+color:${RSH.navy};font:12px/1.45 "Segoe UI",system-ui,sans-serif;z-index:10;overflow:hidden}
+#mi4 .head{display:flex;align-items:center;gap:8px;padding:10px 12px;background:linear-gradient(90deg,${RSH.navy},${RSH.blue});color:#fff}
+#mi4 .head .t{flex:1;font-weight:700;font-size:13px;letter-spacing:.01em}
+#mi4 .head .t small{display:block;font-weight:400;font-size:10px;opacity:.85}
+#mi4 .head button{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:8px;width:28px;height:24px;cursor:pointer;font-size:13px}
+#mi4 .body{overflow:auto;padding:4px 12px 10px}
+#mi4.collapsed{width:auto}#mi4.collapsed .body,#mi4.collapsed .foot{display:none}
+#mi4 .sec{display:flex;align-items:center;gap:6px;margin:10px 0 4px;color:${RSH.blue};text-transform:uppercase;font-size:10px;font-weight:700;letter-spacing:.09em}
+.mi4i,button.mi4i{all:unset;box-sizing:border-box!important;display:inline-block!important;padding:1px 8px!important;border-radius:999px!important;
+background:${RSH.golden}!important;color:${RSH.navy}!important;font:700 10px/14px "Segoe UI",system-ui,sans-serif!important;letter-spacing:.02em!important;
+text-transform:none!important;cursor:pointer!important;flex:none!important;box-shadow:0 0 6px rgba(254,188,17,.9),0 0 1px rgba(16,50,84,.6)!important;border:0!important;margin:0!important}
+.mi4i:hover{filter:brightness(1.08)}
+.mi4i.on,button.mi4i.on{background:${RSH.navy}!important;color:${RSH.golden}!important;box-shadow:0 0 6px rgba(16,50,84,.6)!important}
+.mi4info{display:none;margin:2px 0 6px;padding:7px 9px;border-radius:8px;background:${RSH.lightBlueTint};border-left:4px solid ${RSH.blue};
+color:${RSH.navy};font-size:11.5px;line-height:1.45}
+.mi4info.open{display:block}
+#mi4 button.b,#mi4Sec button.b{background:${RSH.blue};color:#fff;border:0;border-radius:8px;padding:5px 9px;margin:2px;cursor:pointer;font-size:12px;box-shadow:0 1px 3px rgba(16,50,84,.25)}
+#mi4 button.b:hover,#mi4Sec button.b:hover{filter:brightness(1.1)}
+#mi4 button.b.on,#mi4Sec button.b.on{background:${RSH.golden};color:${RSH.navy}}
+#mi4 .val{float:right;font-weight:700;color:${RSH.navy}}
+#mi4 input[type=range]{width:100%;accent-color:${RSH.blue}}
+#mi4 input[type=text]{width:100%;box-sizing:border-box;border:1px solid ${RSH.lightBlue};border-radius:8px;padding:5px 7px;background:#fff;color:${RSH.navy}}
+#mi4 details{border:1px solid rgba(33,94,172,.15);border-radius:10px;margin:5px 0;background:rgba(255,255,255,.7)}
+#mi4 summary{display:flex;align-items:center;gap:7px;padding:6px 8px;cursor:pointer;list-style:none;font-weight:600}
+#mi4 summary::-webkit-details-marker{display:none}
+#mi4 summary .arw{width:10px;color:${RSH.blue};transition:transform .15s}
+#mi4 details[open] summary .arw{transform:rotate(90deg)}
+#mi4 .sw{width:14px;height:14px;border-radius:4px;flex:none;cursor:pointer;border:1px solid rgba(16,50,84,.35)}
+#mi4 .sw:hover{transform:scale(1.2)}
+#mi4 .cnt{margin-left:auto;font-weight:400;color:${RSH.darkGray};font-size:11px}
+#mi4 .lv{display:flex;align-items:center;gap:6px;padding:2px 8px 2px 26px;border-radius:6px}
+#mi4 .lv:hover{background:${RSH.lightBlueTint}}
+#mi4 .lv.hit{background:${RSH.golden};color:${RSH.navy};font-weight:700}
+#mi4 input[type=checkbox]{accent-color:${RSH.blue};margin:0}
+#mi4 .keys{color:${RSH.darkGray};font-size:11px}
+#mi4 .keys b{display:inline-block;min-width:16px;text-align:center;border:1px solid ${RSH.lightBlue};border-radius:4px;padding:0 3px;margin:0 1px;background:#fff;color:${RSH.navy}}
+#mi4Log{background:#F4F7FB;border:1px solid ${RSH.lightGrayTint};border-radius:8px;padding:6px;max-height:150px;overflow:auto;
+font:11px/1.35 ui-monospace,Consolas,monospace;white-space:pre-wrap;color:${RSH.navy}}
+#mi4Log .e{color:${RSH.plum};font-weight:700}#mi4Log .w{color:${RSH.darkGray};border-left:3px solid ${RSH.golden};padding-left:4px}
+#mi4Log .ok{color:${RSH.green}}
+#mi4Tip{position:absolute;display:none;pointer-events:none;z-index:11;padding:4px 8px;border-radius:8px;
+background:rgba(255,255,255,.9);backdrop-filter:blur(8px);color:${RSH.navy};font:600 12px "Segoe UI",system-ui,sans-serif;
+border-left:4px solid ${RSH.golden};box-shadow:0 4px 12px rgba(16,50,84,.25);white-space:nowrap}
+#mi4Hint{position:absolute;top:14px;left:50%;transform:translateX(-50%);display:none;z-index:14;pointer-events:none;
+padding:10px 18px;border-radius:12px;background:rgba(16,50,84,.92);color:#fff;font:600 15px "Segoe UI",system-ui,sans-serif;
+border-left:6px solid ${RSH.golden};box-shadow:0 8px 24px rgba(16,50,84,.45);max-width:70%;text-align:center}
+#mi4Hint small{display:block;font-weight:400;font-size:12px;opacity:.85;margin-top:2px}
+#mi4 .foot{padding:6px 12px;font-size:10px;color:${RSH.darkGray};border-top:1px solid rgba(33,94,172,.15);background:rgba(215,234,249,.5)}
+#mi4Logo{position:absolute;right:16px;bottom:36px;width:120px;opacity:1;pointer-events:none;z-index:9;
+filter:drop-shadow(0 0 2px #fff) drop-shadow(0 0 4px #fff) drop-shadow(0 0 8px rgba(255,255,255,.85))}
+#mi4Sec{position:absolute;right:14px;top:56px;width:560px;height:400px;display:none;flex-direction:column;z-index:12;
+background:#000;border:1px solid rgba(33,94,172,.5);border-radius:14px;overflow:hidden;box-shadow:0 14px 40px rgba(16,50,84,.35);
+font:12px/1.4 "Segoe UI",system-ui,sans-serif;color:${RSH.navy};resize:both;min-width:380px;min-height:260px}
+#mi4Sec .sh{display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:6px 8px;background:linear-gradient(90deg,${RSH.navy},${RSH.blue});color:#fff;cursor:move;user-select:none}
+#mi4Sec .sh .t{flex:1 1 100%;font-weight:700}
+#mi4Sec .sh .sp{flex:1}
+#mi4Sec .sh button.x{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:8px;width:26px;height:22px;cursor:pointer}
+#mi4Sec .mi4info{margin:0;border-radius:0}
+#mi4Sec .sbw{flex:1;display:flex;min-height:0}
+#mi4Sec .sb{flex:1;position:relative;min-height:0}
+#mi4Sec .lay{display:none;width:200px;flex:none;overflow:auto;background:#111;color:#E6EDF5;border-left:1px solid #333;padding:6px 10px;font-size:12px}
+#mi4Sec .lay.open{display:block}
+#mi4Sec .lay h4{margin:8px 0 4px;color:${RSH.golden};font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+#mi4Sec .lay label{display:flex;align-items:center;gap:6px;margin:3px 0;cursor:pointer}
+#mi4Sec .lay input[type=range]{width:100%;accent-color:${RSH.golden}}
+#mi4Sec .lsw{width:10px;height:10px;border-radius:3px;flex:none}
+#mi4Sec .sb .cesium-widget-credits{display:none!important}
+#mi4Sec .res{padding:5px 8px;border-top:1px solid #222;background:#111;color:#fff;min-height:18px;font-weight:600}`;
+document.head.appendChild(css);
+
+const panel = document.createElement("div");
+panel.id = "mi4";
+document.body.appendChild(panel);
+function el(tag, text, parent, cls) {
+  const n = document.createElement(tag);
+  if (text !== undefined) n.textContent = text;
+  if (cls) n.className = cls;
+  (parent || body).appendChild(n);
+  return n;
+}
+// "i" button that opens/closes an explanation box under the title
+function infoButton(parentTitle, html, insertAfter) {
+  const b = el("button", "How?", parentTitle, "mi4i");
+  b.title = "What do these buttons do?";
+  const box = document.createElement("div");
+  box.className = "mi4info";
+  box.innerHTML = html;
+  insertAfter.after(box);
+  b.onclick = (e) => {
+    e.stopPropagation();
+    const open = !box.classList.contains("open");
+    box.classList.toggle("open", open);
+    b.classList.toggle("on", open);
+  };
+  return box;
+}
+const head = el("div", undefined, panel, "head");
+const title = el("div", undefined, head, "t");
+title.textContent = PROJECT_NAME;
+el("small", "Cesium · iModel viewer", title);
+const collapseBtn = el("button", "▾", head);
+collapseBtn.title = "Collapse / open panel";
+collapseBtn.onclick = () => {
+  panel.classList.toggle("collapsed");
+  collapseBtn.textContent = panel.classList.contains("collapsed") ? "▸" : "▾";
+};
+const body = el("div", undefined, panel, "body");
+function section(name, infoHtml) {
+  const t = el("div", undefined, body, "sec");
+  el("span", name, t);
+  const row = el("div", undefined, body);
+  if (infoHtml) infoButton(t, infoHtml, t);
+  return row;
+}
+const groundRow = section("Ground", INFO.ground);
+const clipRow = section("Clip ground", INFO.clip);
+const cutRow = section("Cross-section", INFO.cut);
+const viewRow = section("View", INFO.view);
+const viewsRow = section("Views", INFO.views);
+const keys = section("Move", INFO.move);
+keys.className = "keys";
+keys.innerHTML = "<b>W</b><b>A</b><b>S</b><b>D</b> walk · <b>Q</b>/<b>E</b> down/up · arrows look · hold <b>Shift</b> = fast. Click the map first.";
+const filesRow = section("Files", INFO.files);
+const search = el("input", undefined, filesRow);
+search.type = "text";
+search.placeholder = "Search levels…";
+const fileList = el("div", undefined, filesRow);
+section("Log");
+const logBox = el("div", undefined, body);
+logBox.id = "mi4Log";
+el("div", TEAM_CREDIT, panel, "foot");
+
+const t0 = performance.now();
+function log(msg, kind) {
+  const s = ((performance.now() - t0) / 1000).toFixed(1).padStart(5);
+  const line = `[${s}s] ${msg}`;
+  el("div", line, logBox, kind || "");
+  logBox.scrollTop = logBox.scrollHeight;
+  (kind === "e" ? console.error : kind === "w" ? console.warn : console.log)(line);
+}
+
+// ---------------- SECTION 3 · STATE ----------------
+let viewer, tileset, elementService, globe;
+const norm = (v) => (v === undefined || v === null ? undefined : BigInt(v).toString());
+const files = [];                 // { label, color, cesiumColor, levels:[{id,label,row,cb}], details, cb, swatch }
+const catToFile = new Map();      // categoryId -> file (level ids are unique per file)
+const hiddenCats = new Set();     // categoryId
+const catLabel = new Map();       // categoryId -> level name
+const styledTilesets = [];        // main tileset + section-window tileset
+let selectedElementId;
+let colorByFile = false;
+let colorBtnRef;
+let activeClick = 0;
+let pickMode = null;              // null | "cut" | "road1" | "road2" | "under" — what the next map click does
+let clipCollection, clipBtnRef;   // Clip ground polygons (Section 8b)
+let hintEl;
+const goldenColor = Cesium.Color.fromCssColorString(RSH.golden);
+
+function fileOf(feature) {
+  return catToFile.get(norm(feature.getProperty("category")));
+}
+// The written banner at the top of the map ("Click the spot you want…")
+function showHint(text, small) {
+  if (!hintEl) return;
+  hintEl.innerHTML = "";
+  hintEl.appendChild(document.createTextNode(text));
+  const s = document.createElement("small");
+  s.textContent = small ?? "Press Esc to cancel";
+  hintEl.appendChild(s);
+  hintEl.style.display = "block";
+}
+function hideHint() {
+  if (hintEl) hintEl.style.display = "none";
+}
+function setPickMode(mode, hint) {
+  pickMode = mode;
+  if (viewer) viewer.canvas.style.cursor = mode ? "crosshair" : "";
+  if (mode && hint) showHint(hint);
+  else hideHint();
+}
+function setColorByFile(on) {
+  colorByFile = on;
+  if (colorBtnRef) colorBtnRef.classList.toggle("on", on);
+  files.forEach((f) => f.swatch && (f.swatch.style.outline = on ? `2px solid ${RSH.navy}` : "none"));
+  refresh();
+}
+
+// ---------------- SECTION 4 · VIEWER + MODEL ----------------
+try {
+  log("Step 1/8 · Checking token…");
+  if (!ION_TOKEN || ION_TOKEN.startsWith("PASTE_")) {
+    throw new Error("No ion token. Paste yours into ION_TOKEN in Section 1 (ion > Access Tokens).");
+  }
+  Cesium.Ion.defaultAccessToken = ION_TOKEN;
+  log("Token set.", "ok");
+
+  log("Step 2/8 · Building viewer + world terrain…");
+  viewer = new Cesium.Viewer("cesiumContainer", {
+    timeline: false, animation: false, baseLayerPicker: false,
+    terrain: Cesium.Terrain.fromWorldTerrain(),
+    showRenderLoopErrors: false,   // we recover ourselves (see below)
+  });
+  globe = viewer.scene.globe;
+  globe.depthTestAgainstTerrain = true;
+  globe.translucency.enabled = false;
+  globe.undergroundColor = Cesium.Color.fromCssColorString(RSH.navy);
+  globe.undergroundColorAlphaByDistance.nearValue = 1.0;
+  globe.undergroundColorAlphaByDistance.farValue = 1.0;
+
+  // Auto-recovery: if Cesium stops drawing, turn Clip ground off and restart.
+  viewer.scene.renderError.addEventListener((scene, err) => {
+    log(`Cesium stopped drawing: ${err?.message ?? err}. Turning Clip ground off and restarting the view…`, "e");
+    try { if (clipCollection) { clipCollection.enabled = false; setClipButtons(); } } catch (e) { /* ignore */ }
+    setTimeout(() => { viewer.useDefaultRenderLoop = true; log("View restarted.", "ok"); }, 300);
+  });
+
+  // RS&H logo (bottom-right, solid with a soft white glow)
+  const logo = document.createElement("img");
+  logo.id = "mi4Logo";
+  logo.src = RSH_LOGO;
+  logo.alt = "RS&H";
+  viewer.container.appendChild(logo);
+  // Instruction banner
+  hintEl = document.createElement("div");
+  hintEl.id = "mi4Hint";
+  viewer.container.appendChild(hintEl);
+  log("Viewer ready.", "ok");
+
+  log(`Step 3/8 · Loading tileset ${TILESET_ASSET_ID}…`);
+  try {
+    tileset = await Cesium.Cesium3DTileset.fromIonAssetId(TILESET_ASSET_ID);
+  } catch (err) {
+    throw new Error(`Couldn't load asset ${TILESET_ASSET_ID}: ${err.message}. ` +
+      "Check the token can read this asset and that tiling reached 100%.");
+  }
+  viewer.scene.primitives.add(tileset);
+  if (HEIGHT_NUDGE_METERS !== 0) {
+    const c = Cesium.Cartographic.fromCartesian(tileset.boundingSphere.center);
+    const a = Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, 0);
+    const b = Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, HEIGHT_NUDGE_METERS);
+    tileset.modelMatrix = Cesium.Matrix4.fromTranslation(Cesium.Cartesian3.subtract(b, a, new Cesium.Cartesian3()));
+    log(`Height nudged ${HEIGHT_NUDGE_METERS} m.`);
+  }
+  await viewer.zoomTo(tileset);
+  log("Tileset loaded.", "ok");
+
+  // Level names from tileset metadata (backup labels if the tree has none)
+  const md = tileset.metadata;
+  const catIds = md && md.getProperty("categoryIds");
+  const catNames = md && md.getProperty("categoryNames");
+  if (catIds && catNames) catIds.forEach((id, i) => catLabel.set(norm(id), String(catNames[i])));
+  log(`Tileset metadata: ${catLabel.size} level names.`, catLabel.size ? "ok" : "w");
+
+  // ---------------- SECTION 5 · STYLE ----------------
+  tileset.style = makeStyle();
+  styledTilesets.push(tileset);
+
+  // ---------------- SECTION 6 · FILES + LEVELS (model tree) ----------------
+  log("Step 4/8 · Reading files from the model tree…");
+  elementService = Cesium.IonAssetElementService.fromAssetId(TILESET_ASSET_ID);
+  await buildFileTree();
+
+  // ---------------- SECTION 7 · CLICK-TO-LEARN ----------------
+  log("Step 5/8 · Setting up click-to-learn…");
+  const infoEntity = viewer.entities.add(new Cesium.Entity({ show: false }));
+  function propertiesTable(props) {
+    return `<table class="cesium-infoBox-defaultTable"><tbody>${Object.entries(props).map(([k, p]) => {
+      const tr = document.createElement("tr");
+      const b = document.createElement("b");
+      b.textContent = k;
+      tr.insertCell().appendChild(b);
+      tr.insertCell().textContent = String(p?.displayValue ?? p?.value ?? p);
+      return tr.outerHTML;
+    }).join("")}</tbody></table>`;
+  }
+  async function depthOfCover(pos) {
+    if (!Cesium.defined(pos)) return undefined;
+    const c = Cesium.Cartographic.fromCartesian(pos);
+    const g = new Cesium.Cartographic(c.longitude, c.latitude, 0);
+    const [s] = await Cesium.sampleTerrainMostDetailed(viewer.terrainProvider, [g]);
+    return s.height - c.height;
+  }
+  function depthHtml(d) {
+    if (d === undefined || !isFinite(d)) return "";
+    const ft = Math.abs(d) * 3.28084;
+    const word = d >= 0 ? "below" : "above";
+    return `<p style="margin:4px 0 8px;padding:6px 8px;border-left:4px solid ${RSH.golden};background:${RSH.lightBlueTint};color:${RSH.navy}">` +
+      `<b>Depth at the point you clicked:</b> ${ft.toFixed(1)} ft (${Math.abs(d).toFixed(2)} m) ${word} ground` +
+      `<br><small>Measured against Cesium World Terrain, not your design surface.</small></p>`;
+  }
+  async function fetchElement(id) {
+    try {
+      return await elementService.getElement(id);
+    } catch (err) {
+      log(`Element ${id} not on ${TILESET_ASSET_ID} (${err.message}); trying ${DATABASE_ASSET_ID}…`, "w");
+      return await Cesium.IonAssetElementService.fromAssetId(DATABASE_ASSET_ID).getElement(id);
+    }
+  }
+  viewer.screenSpaceEventHandler.setInputAction(async (move) => {
+    // Tools that are waiting for a click on the map
+    if (pickMode === "cut") { placeCutAt(move.position); return; }
+    if (pickMode === "road1" || pickMode === "road2") { roadClick(move.position); return; }
+    if (pickMode === "under") { goUnderAt(move.position); return; }
+    const mine = ++activeClick;
+    const hit = pickNear(viewer.scene, move.position);
+    const feature = hit?.feature;
+    const id = feature ? Cesium.IonAssetElementService.getElementId(feature) : undefined;
+    clearHits();
+    if (id === undefined) {
+      selectedElementId = undefined;
+      refresh();
+      viewer.selectedEntity = undefined;
+      return;
+    }
+    selectedElementId = id;
+    refresh();
+    const c = norm(feature.getProperty("category"));
+    const f = catToFile.get(c);
+    const lvl = catLabel.get(c);
+    const clickPos = hit?.position;
+    const depthP = depthOfCover(clickPos).catch((err) => {
+      log(`Depth of cover unavailable: ${err.message}`, "w");
+      return undefined;
+    });
+    const where = [f?.label, lvl].filter(Boolean).join(" › ");
+    revealInPanel(f, c);
+    infoEntity.name = where || `Element ${id}`;
+    infoEntity.description = "Loading…";
+    infoEntity.show = true;
+    viewer.selectedEntity = infoEntity;
+    try {
+      const e = await fetchElement(id);
+      if (mine !== activeClick) return;
+      if (e?.label) infoEntity.name = e.label + (where ? `  (${where})` : "");
+      const depth = await depthP;
+      if (mine !== activeClick) return;
+      infoEntity.description = depthHtml(depth) + propertiesTable(e?.properties ?? {});
+      log(`Clicked: ${infoEntity.name}` + (depth !== undefined ? ` · depth ${(depth * 3.28084).toFixed(1)} ft` : ""));
+    } catch (err) {
+      if (mine !== activeClick) return;
+      infoEntity.description = `<p style="color:${RSH.plum}">Couldn't load properties: ${err.message}</p>`;
+      log(`Click-to-learn failed for ${id}: ${err.message}`, "e");
+    }
+  }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+  log("Click any piece of the model to see its info.", "ok");
+
+  // ---------------- SECTION 8 · GROUND (X-ray + Go underground) ----------------
+  // X-ray: off → on (whole ground) → close up only → off. "Close up only" uses
+  // GlobeTranslucency frontFaceAlphaByDistance (see-through near the camera).
+  log("Step 6/8 · Ground controls…");
+  const XRAY_MODES = ["off", "on", "close up only"];
+  let xrayMode = "off";
+  let groundPct = GROUND_START_PERCENT;
+  const xray = el("button", "X-ray: off", groundRow, "b");
+  xray.title = "Click to change: off → on → close up only";
+  const under = el("button", "Go underground", groundRow, "b");
+  const sliderLabel = el("div", "Ground opacity", groundRow);
+  sliderLabel.style.marginTop = "6px";
+  const pct = el("span", "", sliderLabel, "val");
+  const slider = el("input", undefined, groundRow);
+  slider.type = "range"; slider.min = 0; slider.max = 100; slider.step = 1;
+  slider.value = GROUND_START_PERCENT;
+
+  function applyGround() {
+    const on = xrayMode !== "off";
+    globe.translucency.enabled = on;
+    const a = groundPct / 100;
+    if (xrayMode === "close up only") {
+      // Cesium multiplies the constant alpha by the by-distance alpha, so keep the constant at 1
+      globe.translucency.frontFaceAlpha = 1.0;
+      globe.translucency.backFaceAlpha = 1.0;
+      globe.translucency.frontFaceAlphaByDistance = new Cesium.NearFarScalar(XRAY_CLOSE_METERS, a, XRAY_CLOSE_METERS * 2, 1.0);
+      globe.translucency.backFaceAlphaByDistance = new Cesium.NearFarScalar(XRAY_CLOSE_METERS, a, XRAY_CLOSE_METERS * 2, 1.0);
+    } else {
+      globe.translucency.frontFaceAlphaByDistance = undefined;
+      globe.translucency.backFaceAlphaByDistance = undefined;
+      globe.translucency.frontFaceAlpha = a;
+      globe.translucency.backFaceAlpha = a;
+    }
+    xray.textContent = "X-ray: " + xrayMode;
+    xray.classList.toggle("on", on);
+    pct.textContent = groundPct + "%" + (xrayMode === "close up only" ? ` within ${XRAY_CLOSE_METERS} m` : "");
+  }
+  function setXrayMode(mode) {
+    xrayMode = mode;
+    applyGround();
+  }
+  xray.onclick = () => {
+    setXrayMode(XRAY_MODES[(XRAY_MODES.indexOf(xrayMode) + 1) % XRAY_MODES.length]);
+    log("X-ray " + xrayMode + (xrayMode === "close up only" ? ` (see-through within ${XRAY_CLOSE_METERS} m of you)` : ""));
+  };
+  slider.oninput = () => {
+    groundPct = Number(slider.value);
+    if (xrayMode === "off") xrayMode = "on";
+    applyGround();
+  };
+  slider.onchange = () => log(`Ground opacity ${groundPct}%`);
+  applyGround();
+
+  // Go underground → click a spot → you're under it; button becomes "Back up"
+  let aboveView = null;   // where you were before going under
+  function updateUnderBtn() {
+    under.textContent = aboveView ? "Back up" : "Go underground";
+    under.title = aboveView ? "Fly back to where you were before going underground" : "Then click the spot you want to go under";
+    under.classList.toggle("on", pickMode === "under" || !!aboveView);
+  }
+  under.onclick = () => {
+    if (aboveView) {
+      const v = aboveView;
+      aboveView = null;
+      stopOrbit();
+      setXrayMode("off");
+      viewer.scene.screenSpaceCameraController.enableCollisionDetection = true;
+      viewer.camera.flyTo({ destination: v.destination, orientation: { heading: v.heading, pitch: v.pitch, roll: v.roll }, duration: 2 });
+      updateUnderBtn();
+      log("Back up: returned to where you were.");
+      return;
+    }
+    if (pickMode === "under") { setPickMode(null); updateUnderBtn(); log("Go underground cancelled"); return; }
+    setPickMode("under", "Click the spot you want to go under");
+    updateUnderBtn();
+    log("Go underground: click the spot you want to be under…");
+  };
+  async function goUnderAt(screenPos) {
+    let p = viewer.scene.pickPosition(screenPos);
+    if (!Cesium.defined(p)) p = globe.pick(viewer.camera.getPickRay(screenPos), viewer.scene);
+    if (!Cesium.defined(p)) { showHint("Nothing there — click on the model or the ground"); log("Couldn't find a spot there — click on the model or the ground.", "w"); return; }
+    setPickMode(null);
+    const c = Cesium.Cartographic.fromCartesian(p);
+    let ground = c.height;
+    try {
+      const [s] = await Cesium.sampleTerrainMostDetailed(viewer.terrainProvider, [new Cesium.Cartographic(c.longitude, c.latitude)]);
+      if (Cesium.defined(s.height)) ground = s.height;
+    } catch (err) { log(`Ground height unavailable (${err.message}); using the clicked height`, "w"); }
+    const cam = viewer.camera;
+    aboveView = { destination: Cesium.Cartesian3.clone(cam.positionWC), heading: cam.heading, pitch: cam.pitch, roll: cam.roll };
+    updateUnderBtn();
+    if (xrayMode === "off") setXrayMode("on");
+    viewer.scene.screenSpaceCameraController.enableCollisionDetection = false;
+    // Stand back from the spot (opposite the way you're facing) and look at it from below
+    const h = cam.heading;
+    const enu = Cesium.Transforms.eastNorthUpToFixedFrame(Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, ground));
+    const local = new Cesium.Cartesian3(-Math.sin(h) * UNDERGROUND_BACKOFF_M, -Math.cos(h) * UNDERGROUND_BACKOFF_M, -UNDERGROUND_DEPTH_M);
+    const dest = Cesium.Matrix4.multiplyByPoint(enu, local, new Cesium.Cartesian3());
+    cam.flyTo({ destination: dest, orientation: { heading: h, pitch: Cesium.Math.toRadians(8), roll: 0 }, duration: 2 });
+    log(`Going underground: ${UNDERGROUND_DEPTH_M} m below ground, ${UNDERGROUND_BACKOFF_M} m back from the spot. WASD to walk, Back up to return.`);
+  }
+  updateUnderBtn();
+
+  // ---------------- SECTION 8b · CLIP GROUND (Clipping assist footprint) ----------------
+  // Cuts Cesium World Terrain + imagery under the model footprint, like the iModel
+  // viewer's map masking. Cesium's ClippingPolygon has no "holes" option, so each
+  // footprint part with holes (the grass inside loops) is turned into ONE outline
+  // that runs out to each hole and back along a zero-width "bridge". The hole
+  // areas are then outside the polygon, so the ground there stays.
+  log("Step 6b · Clip ground…");
+  const clipBtn = el("button", "Clip ground: loading…", clipRow, "b");
+  clipBtnRef = clipBtn;
+  clipBtn.title = "Cut the ground/map away under the model";
+  await loadClipGround();
+  clipBtn.onclick = () => {
+    if (!clipCollection) return log("Clip ground isn't loaded (see the error above).", "w");
+    clipCollection.enabled = !clipCollection.enabled;
+    setClipButtons();
+    log("Clip ground " + (clipCollection.enabled ? "on" : "off"));
+  };
+
+  async function loadClipGround() {
+    if (Cesium.ClippingPolygonCollection.isSupported && !Cesium.ClippingPolygonCollection.isSupported(viewer.scene)) {
+      clipBtn.textContent = "Clip ground: not supported";
+      log("Clip ground needs WebGL 2 — this browser/graphics card can't do clipping polygons.", "e");
+      return;
+    }
+    try {
+      const resource = await Cesium.IonResource.fromAssetId(CLIP_ASSET_ID);
+      // not clamped: we only need the shape (also avoids the "outlines unsupported on terrain" warning)
+      const ds = await Cesium.GeoJsonDataSource.load(resource, { clampToGround: false });
+      const now = Cesium.JulianDate.now();
+      const polys = [];
+      let holeCount = 0, vertexCount = 0;
+      ds.entities.values.forEach((ent) => {
+        if (!ent.polygon) return;
+        const h = ent.polygon.hierarchy.getValue(now);
+        if (!h || !h.positions || h.positions.length < 3) return;
+        const holes = (h.holes || []).map((x) => x.positions).filter((p) => p && p.length >= 3);
+        holeCount += holes.length;
+        const ring = KEEP_FOOTPRINT_HOLES && holes.length ? bridgeHoles(h.positions, holes) : h.positions;
+        vertexCount += ring.length;
+        polys.push(new Cesium.ClippingPolygon({ positions: ring }));
+      });
+      if (!polys.length) throw new Error("the footprint asset has no polygons in it");
+      clipCollection = new Cesium.ClippingPolygonCollection({ polygons: polys, enabled: CLIP_GROUND_ON_START });
+      globe.clippingPolygons = clipCollection;
+      setClipButtons();
+      log(`Clip ground ready: ${polys.length} polygon(s), ${holeCount} hole(s) ` +
+        (KEEP_FOOTPRINT_HOLES ? "kept (grass inside loops stays)" : "ignored (whole outline cut)") +
+        `, ${vertexCount} points · ${CLIP_GROUND_ON_START ? "on" : "off"} at start`, "ok");
+    } catch (err) {
+      clipBtn.textContent = "Clip ground: failed";
+      log(`Clip ground failed: ${err.message}. If it mentions 401/404, add asset ${CLIP_ASSET_ID} ` +
+        "to the token's Selected assets (ion > Access Tokens) and check the footprint finished tiling.", "e");
+    }
+  }
+
+  // ---------------- SECTION 8c · CROSS-SECTION (clipping planes) ----------------
+  // Place cut → click the model: a vertical cut goes through that point, facing the
+  // way the camera looks. Cut across road → two clicks along the road: the cut
+  // goes square to the road. Planes are built in a frame at the cut point and
+  // converted into the tileset's clipping frame.
+  log("Step 6c · Cross-section tool…");
+  const placeBtn = el("button", "Place cut", cutRow, "b");
+  placeBtn.title = "Then click a point on the model";
+  const clearCutBtn = el("button", "Remove cut", cutRow, "b");
+  const roadBtn = el("button", "Cut across road", cutRow, "b");
+  roadBtn.title = "Then click two points along the road (the way cars drive)";
+  const faceBtn = el("button", "Face camera", cutRow, "b");
+  faceBtn.title = "Turn the cut to face the way you're looking";
+  const sliceBtn = el("button", "Section only: off", cutRow, "b");
+  sliceBtn.title = "Keep only a thin strip at the cut";
+  const soilBtn = el("button", "Soil fill: off", cutRow, "b");
+  soilBtn.title = "Colour the cut face below the ground line";
+  const secBtn = el("button", "Section window", cutRow, "b");
+  secBtn.title = "Open a flat side view of the cut, with measuring";
+  function sliderRow(label, min, max, step, value) {
+    const lab = el("div", label, cutRow);
+    lab.style.marginTop = "6px";
+    const val = el("span", "", lab, "val");
+    const input = el("input", undefined, cutRow);
+    input.type = "range"; input.min = min; input.max = max; input.step = step; input.value = value;
+    return { input, val };
+  }
+  const rotS = sliderRow("Rotate", -180, 180, 1, 0);
+  const slideS = sliderRow("Slide", -CUT_SLIDE_METERS, CUT_SLIDE_METERS, 0.5, 0);
+  const thickS = sliderRow("Thickness (Section only)", 1, 50, 0.5, SLICE_START_METERS);
+  const cut = { on: false, point: undefined, heading: 0, offset: 0, slice: false, thickness: SLICE_START_METERS, soil: SOIL_FILL_ON_START, leftFt: CUT_LEFT_FT, rightFt: CUT_RIGHT_FT };
+  // Left / Right width: number box + slider, in feet
+  function widthRow(label, key) {
+    const lab = el("div", label, cutRow);
+    lab.style.cssText = "margin-top:6px;display:flex;align-items:center;gap:6px";
+    const num = el("input", undefined, lab);
+    num.type = "number"; num.min = 1; num.max = 5000; num.step = 1; num.value = cut[key];
+    num.style.cssText = "width:70px;margin-left:auto;border:1px solid #85C7EE;border-radius:6px;padding:2px 4px";
+    el("span", "ft", lab);
+    const range = el("input", undefined, cutRow);
+    range.type = "range"; range.min = 5; range.max = 1000; range.step = 5; range.value = cut[key];
+    const set = (v, from) => {
+      v = Math.max(1, Math.min(5000, Number(v) || 1));
+      cut[key] = v;
+      if (from !== num) num.value = v;
+      if (from !== range) range.value = Math.min(v, 1000);
+      applyCut();
+    };
+    num.oninput = () => set(num.value, num);
+    range.oninput = () => set(range.value, range);
+    const done = () => cut.on && log(`Cut width: L ${cut.leftFt} ft / R ${cut.rightFt} ft`);
+    num.onchange = done; range.onchange = done;
+  }
+  widthRow("Left width", "leftFt");
+  widthRow("Right width", "rightFt");
+  let tilesetCut, globeCut, cutOutline, soilWall, soilTimer, roadFirst;
+
+  function wrapDeg(d) { return ((d + 540) % 360) - 180; }
+  function refreshLabels() {
+    rotS.val.textContent = `${Math.round(cut.heading)}°`;
+    slideS.val.textContent = `${cut.offset.toFixed(1)} m (${(cut.offset * 3.28084).toFixed(0)} ft)`;
+    thickS.val.textContent = `${cut.thickness} m (${(cut.thickness * 3.28084).toFixed(1)} ft)`;
+    sliceBtn.textContent = "Section only: " + (cut.slice ? "on" : "off");
+    sliceBtn.classList.toggle("on", cut.slice);
+    soilBtn.textContent = "Soil fill: " + (cut.soil ? "on" : "off");
+    soilBtn.classList.toggle("on", cut.soil);
+    placeBtn.classList.toggle("on", pickMode === "cut");
+    roadBtn.classList.toggle("on", pickMode === "road1" || pickMode === "road2");
+  }
+  function applyCut() {
+    refreshLabels();
+    if (!cut.on || !cut.point) return;
+    const enu = cutFrame(cut);
+    if (!tilesetCut) { tilesetCut = newPlaneCollection(cut, cut.slice); tileset.clippingPlanes = tilesetCut; }
+    if (!globeCut) { globeCut = newPlaneCollection(cut, cut.slice); globe.clippingPlanes = globeCut; }
+    updatePlaneCollection(tilesetCut, toTilesetFrame(tileset, enu), cut, cut.slice);
+    updatePlaneCollection(globeCut, enu, cut, cut.slice);
+    // golden outline showing where the cut is
+    const n = cutNormal(cut);
+    const { L, R } = cutWidths(cut);
+    const h = Cesium.Math.toRadians(cut.heading);
+    const mid = (R - L) / 2;   // the rectangle is centred between the left and right limits
+    const center = Cesium.Matrix4.multiplyByPoint(enu,
+      new Cesium.Cartesian3(n.x * cut.offset + Math.cos(h) * mid, n.y * cut.offset - Math.sin(h) * mid, 0), new Cesium.Cartesian3());
+    const dims = new Cesium.Cartesian2(L + R, 40);
+    if (!cutOutline) {
+      cutOutline = viewer.entities.add({
+        position: center,
+        plane: { plane: new Cesium.Plane(n, 0), dimensions: dims, fill: false, outline: true, outlineColor: goldenColor },
+      });
+    } else {
+      cutOutline.position = center;
+      cutOutline.plane.plane = new Cesium.Plane(n, 0);
+      cutOutline.plane.dimensions = dims;
+      cutOutline.show = true;
+    }
+    scheduleSoil();
+    if (sectionOpen) syncSection(false);
+  }
+  // Soil fill: a brown wall along the cut, from the ground line down SOIL_DEPTH_METERS
+  function scheduleSoil() {
+    clearTimeout(soilTimer);
+    soilTimer = setTimeout(async () => {
+      if (!cut.on || !cut.soil) { if (soilWall) soilWall.show = false; return; }
+      try {
+        const { positions, maxH, minH } = await soilProfile(viewer, cut);
+        if (!soilWall) {
+          soilWall = viewer.entities.add({ wall: { positions, maximumHeights: maxH, minimumHeights: minH,
+            material: Cesium.Color.fromCssColorString(SOIL_COLOR).withAlpha(0.8) } });
+        } else {
+          soilWall.wall.positions = positions;
+          soilWall.wall.maximumHeights = maxH;
+          soilWall.wall.minimumHeights = minH;
+          soilWall.show = true;
+        }
+      } catch (err) { log(`Soil fill failed: ${err.message}`, "w"); }
+    }, 200);
+  }
+  function startCut(point, headingDeg, how) {
+    cut.point = point;
+    cut.on = true;
+    cut.offset = 0; slideS.input.value = 0;
+    cut.heading = wrapDeg(headingDeg);
+    rotS.input.value = Math.round(cut.heading);
+    if (tilesetCut) tilesetCut.enabled = true;
+    if (globeCut) globeCut.enabled = true;
+    applyCut();
+    const c = Cesium.Cartographic.fromCartesian(point);
+    log(`Cut placed (${how}) at ${Cesium.Math.toDegrees(c.latitude).toFixed(6)}, ${Cesium.Math.toDegrees(c.longitude).toFixed(6)}, ` +
+      `facing ${Math.round(cut.heading)}° · tileset frame: ${tileset.clippingPlanesOriginMatrix ? "root" : "bounding sphere (fallback)"}`, "ok");
+  }
+  function placeCutAt(screenPos) {
+    const p = pickNear(viewer.scene, screenPos)?.position;
+    if (!Cesium.defined(p)) { showHint("Nothing there — click directly on the model"); log("Couldn't find a point there — click directly on the model (or the ground).", "w"); return; }
+    setPickMode(null);
+    startCut(p, Cesium.Math.toDegrees(viewer.camera.heading), "facing camera");
+  }
+  function roadClick(screenPos) {
+    const hit = pickNear(viewer.scene, screenPos);
+    const p = hit?.position;
+    if (!Cesium.defined(p)) { showHint("Nothing there — click on the road or its alignment"); return; }
+    if (pickMode === "road1") {
+      roadFirst = p;
+      const lvl = hit.feature instanceof Cesium.Cesium3DTileFeature ? catLabel.get(norm(hit.feature.getProperty("category"))) : undefined;
+      if (lvl) log(`First point on ${lvl}`);
+      setPickMode("road2", "Now click a second point further along the road (same direction cars drive)");
+      refreshLabels();
+      return;
+    }
+    // second point: road direction from point 1 to point 2, measured at point 2
+    const inv = Cesium.Matrix4.inverseTransformation(Cesium.Transforms.eastNorthUpToFixedFrame(p), new Cesium.Matrix4());
+    const a = Cesium.Matrix4.multiplyByPoint(inv, roadFirst, new Cesium.Cartesian3());
+    const dx = -a.x, dy = -a.y;   // from point 1 to point 2 (point 2 is the origin)
+    if (Math.hypot(dx, dy) < 0.5) { showHint("Those points are too close — click a second point a few metres away"); return; }
+    setPickMode(null);
+    startCut(p, Cesium.Math.toDegrees(Math.atan2(dx, dy)), "across road");
+    log("Slide now moves the cut along the road (like stepping through stations).");
+  }
+  placeBtn.onclick = () => {
+    if (pickMode === "cut") { setPickMode(null); refreshLabels(); log("Place cut cancelled"); return; }
+    setPickMode("cut", "Click a point on the model to place the cut");
+    refreshLabels();
+    log("Place cut: click a point on the model…");
+  };
+  roadBtn.onclick = () => {
+    if (pickMode === "road1" || pickMode === "road2") { setPickMode(null); refreshLabels(); log("Cut across road cancelled"); return; }
+    setPickMode("road1", "Click the first point on the road (or its alignment)");
+    refreshLabels();
+    log("Cut across road: click two points along the road, one behind the other…");
+  };
+  faceBtn.onclick = () => {
+    if (!cut.on) return log("Place a cut first.", "w");
+    cut.heading = wrapDeg(Cesium.Math.toDegrees(viewer.camera.heading));
+    rotS.input.value = Math.round(cut.heading);
+    applyCut();
+    log(`Cut now faces ${Math.round(cut.heading)}°`);
+  };
+  sliceBtn.onclick = () => { cut.slice = !cut.slice; applyCut(); log(cut.slice ? `Section only on: keeping a ${cut.thickness} m strip` : "Section only off: single cut"); };
+  soilBtn.onclick = () => {
+    cut.soil = !cut.soil;
+    refreshLabels();
+    scheduleSoil();
+    if (sectionOpen) syncSection(false);
+    log("Soil fill " + (cut.soil ? "on" : "off"));
+  };
+  clearCutBtn.onclick = () => {
+    cut.on = false;
+    setPickMode(null);
+    if (tilesetCut) tilesetCut.enabled = false;
+    if (globeCut) globeCut.enabled = false;
+    if (cutOutline) cutOutline.show = false;
+    if (soilWall) soilWall.show = false;
+    closeSection();
+    refreshLabels();
+    log("Cut removed");
+  };
+  rotS.input.oninput = () => { cut.heading = Number(rotS.input.value); applyCut(); };
+  slideS.input.oninput = () => { cut.offset = Number(slideS.input.value); applyCut(); };
+  thickS.input.oninput = () => { cut.thickness = Number(thickS.input.value); applyCut(); };
+  [rotS, slideS, thickS].forEach((s) => (s.input.onchange = () => {
+    if (cut.on) log(`Cut: ${Math.round(cut.heading)}°, slide ${cut.offset.toFixed(1)} m` + (cut.slice ? `, strip ${cut.thickness} m` : ""));
+  }));
+  refreshLabels();
+
+  // ---------------- SECTION 8d · SECTION WINDOW (flat wireframe view + grid + measure) ----------------
+  // A second Cesium viewer in its own window, looking straight at the cut. The
+  // camera sits SEC_DIST metres back with a very narrow field of view, so the
+  // picture is flat like a drawing. Cesium's own mouse controls are off; scroll =
+  // zoom, drag = move. The model is drawn as WIREFRAME (Cesium3DTileset
+  // debugWireframe) inside a strip around the cut, cut to your Left/Right widths.
+  // The ground is drawn as a line sampled from Cesium World Terrain. A grid with
+  // offsets and elevations (feet) is drawn on top and follows zoom/pan.
+  const SEC_DIST = 3000;
+  const secWin = document.createElement("div");
+  secWin.id = "mi4Sec";
+  secWin.innerHTML = `<div class="sh"><span class="t">Section</span>
+      <button class="b" data-a="h">Horizontal</button><button class="b" data-a="v">Vertical</button>
+      <button class="b" data-a="s">Slope</button><button class="b" data-a="clear">Clear</button>
+      <button class="b" data-a="layers">Layers</button><button class="b" data-a="fit">Fit</button><span class="sp"></span><button class="mi4i" data-a="info">How?</button>
+      <button class="x" data-a="close">✕</button></div>
+    <div class="mi4info">${INFO.section}</div>
+    <div class="sbw"><div class="sb"></div><div class="lay"></div></div>
+    <div class="res">Scroll to zoom, drag to move. Pick Horizontal, Vertical or Slope to measure.</div>`;
+  viewer.container.appendChild(secWin);
+  const secTitle = secWin.querySelector(".t");
+  const secBody = secWin.querySelector(".sb");
+  const secLay = secWin.querySelector(".lay");
+  const secRes = secWin.querySelector(".res");
+  const secInfo = secWin.querySelector(".mi4info");
+  const layersBtn = secWin.querySelector('[data-a="layers"]');
+  const MEASURE = { h: "Horizontal", v: "Vertical", s: "Slope" };
+  const measureBtns = { h: secWin.querySelector('[data-a="h"]'), v: secWin.querySelector('[data-a="v"]'), s: secWin.querySelector('[data-a="s"]') };
+  let v2, v2Tiles, v2TilesCut, v2GlobeCut, v2Ground, gridCanvas, snapMarker, lastSnap, groundTimer, lastSnapTime = 0;
+  let sectionOpen = false, measureMode = null;
+  let measurePts = [];
+  let groundMidH;                                   // ground height at the cut (for Fit)
+  const measureEntities = [];
+  const secView = { width: 100, s: 0, z: 0 };
+  const secHidden = new Set();                      // files hidden in the section window only
+  const secShow = { groundLine: true, groundSurface: false, grid: true, measure: true };
+  let secStrip = SECTION_STRIP_METERS;
+
+  // drag the window by its header
+  (() => {
+    const bar = secWin.querySelector(".sh");
+    let sx, sy, ox, oy, dragging = false;
+    bar.addEventListener("mousedown", (e) => {
+      if (e.target.tagName === "BUTTON") return;
+      dragging = true; sx = e.clientX; sy = e.clientY;
+      const r = secWin.getBoundingClientRect(), pr = viewer.container.getBoundingClientRect();
+      ox = r.left - pr.left; oy = r.top - pr.top;
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      secWin.style.left = ox + e.clientX - sx + "px";
+      secWin.style.top = oy + e.clientY - sy + "px";
+      secWin.style.right = "auto";
+    });
+    document.addEventListener("mouseup", () => (dragging = false));
+  })();
+
+  secWin.querySelector('[data-a="close"]').onclick = () => closeSection();
+  secWin.querySelector('[data-a="fit"]').onclick = () => { fitSection(); log("Section view fitted to the cut width"); };
+  secWin.querySelector('[data-a="clear"]').onclick = () => clearMeasure();
+  secWin.querySelector('[data-a="info"]').onclick = (e) => {
+    const open = !secInfo.classList.contains("open");
+    secInfo.classList.toggle("open", open);
+    e.target.classList.toggle("on", open);
+  };
+  layersBtn.onclick = () => {
+    const open = !secLay.classList.contains("open");
+    secLay.classList.toggle("open", open);
+    layersBtn.classList.toggle("on", open);
+    setTimeout(() => placeSecCamera(), 50);
+  };
+  Object.entries(measureBtns).forEach(([mode, btn]) => (btn.onclick = () => setMeasureMode(measureMode === mode ? null : mode)));
+  function setMeasureMode(mode) {
+    measureMode = mode;
+    measurePts = [];
+    lastSnap = undefined;
+    if (snapMarker) snapMarker.show = false;
+    Object.entries(measureBtns).forEach(([m, b]) => b.classList.toggle("on", m === mode));
+    if (v2) v2.canvas.style.cursor = mode ? "crosshair" : "";
+    if (mode) {
+      showHint(`${MEASURE[mode]}: click the first point in the section window (it snaps to nearby lines)`);
+      secRes.textContent = `${MEASURE[mode]}: click the first point…`;
+    } else {
+      if (!pickMode) hideHint();
+      secRes.textContent = "Measure off.";
+    }
+  }
+  secBtn.onclick = async () => {
+    if (!cut.on) return log("Place a cut first, then open the section window.", "w");
+    if (sectionOpen) { closeSection(); return; }
+    await openSection();
+  };
+
+  // ---- Layers panel (section window only) ----
+  function buildLayers() {
+    secLay.innerHTML = "";
+    const h = (t) => { const e = document.createElement("h4"); e.textContent = t; secLay.appendChild(e); };
+    const box = (label, checked, onchange, color) => {
+      const row = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.checked = checked;
+      cb.onchange = () => onchange(cb.checked);
+      row.appendChild(cb);
+      if (color) { const sw = document.createElement("span"); sw.className = "lsw"; sw.style.background = color; row.appendChild(sw); }
+      row.appendChild(document.createTextNode(label));
+      secLay.appendChild(row);
+    };
+    h("Files");
+    files.forEach((f) => box(f.label, !secHidden.has(f), (on) => {
+      on ? secHidden.delete(f) : secHidden.add(f);
+      v2Tiles.makeStyleDirty();
+      log(`Section window: ${f.label} ${on ? "on" : "off"}`);
+    }, f.color));
+    h("Show");
+    box("Ground line (terrain)", secShow.groundLine, (on) => { secShow.groundLine = on; if (v2Ground) v2Ground.show = on; });
+    box("Ground surface (solid)", secShow.groundSurface, (on) => { secShow.groundSurface = on; v2.scene.globe.show = on; });
+    box("Grid + numbers", secShow.grid, (on) => { secShow.grid = on; drawGrid(); });
+    box("Measurements", secShow.measure, (on) => { secShow.measure = on; measureEntities.forEach((e) => (e.show = on)); });
+    h("Strip depth");
+    const lab = document.createElement("div");
+    const range = document.createElement("input");
+    range.type = "range"; range.min = 0.5; range.max = 10; range.step = 0.1; range.value = secStrip;
+    const showVal = () => (lab.textContent = `${secStrip.toFixed(1)} m (${(secStrip * 3.28084).toFixed(1)} ft) — thinner = flatter`);
+    range.oninput = () => { secStrip = Number(range.value); showVal(); syncSection(false); };
+    showVal();
+    secLay.appendChild(lab);
+    secLay.appendChild(range);
+  }
+
+  async function openSection() {
+    secWin.style.display = "flex";
+    sectionOpen = true;
+    secBtn.classList.add("on");
+    if (!v2) {
+      log("Opening section window (loads the model a second time)…");
+      try {
+        v2 = new Cesium.Viewer(secBody, {
+          terrain: Cesium.Terrain.fromWorldTerrain(),
+          animation: false, timeline: false, baseLayerPicker: false, geocoder: false, homeButton: false,
+          sceneModePicker: false, navigationHelpButton: false, infoBox: false, selectionIndicator: false,
+          fullscreenButton: false, showRenderLoopErrors: false,
+        });
+        const s2 = v2.scene;
+        s2.screenSpaceCameraController.enableInputs = false;   // our own zoom/pan (below)
+        s2.screenSpaceCameraController.enableCollisionDetection = false;
+        if (s2.skyAtmosphere) s2.skyAtmosphere.show = false;
+        if (s2.skyBox) s2.skyBox.show = false;
+        if (s2.sun) s2.sun.show = false;
+        if (s2.moon) s2.moon.show = false;
+        s2.fog.enabled = false;
+        s2.backgroundColor = Cesium.Color.BLACK;
+        s2.globe.show = secShow.groundSurface;                 // ground drawn as a line instead
+        s2.globe.showGroundAtmosphere = false;
+        s2.globe.baseColor = Cesium.Color.fromCssColorString("#3A3A3A");
+        s2.globe.undergroundColor = Cesium.Color.BLACK;
+        s2.renderError.addEventListener((sc, err) => {
+          log(`Section window stopped drawing: ${err?.message ?? err}; restarting…`, "e");
+          setTimeout(() => (v2.useDefaultRenderLoop = true), 300);
+        });
+        v2Tiles = await Cesium.Cesium3DTileset.fromIonAssetId(TILESET_ASSET_ID, { enableDebugWireframe: true });
+        if (HEIGHT_NUDGE_METERS !== 0) v2Tiles.modelMatrix = Cesium.Matrix4.clone(tileset.modelMatrix);
+        s2.primitives.add(v2Tiles);
+        v2Tiles.debugWireframe = true;                          // always wireframe
+        v2Tiles.style = makeStyle((f) => { const file = fileOf(f); return !!file && secHidden.has(file); });
+        styledTilesets.push(v2Tiles);
+        // grid overlay
+        gridCanvas = document.createElement("canvas");
+        gridCanvas.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:3";
+        secBody.appendChild(gridCanvas);
+        // snap marker
+        snapMarker = v2.entities.add({ show: false, position: Cesium.Cartesian3.ZERO,
+          point: { pixelSize: 12, color: Cesium.Color.TRANSPARENT, outlineColor: goldenColor, outlineWidth: 3, disableDepthTestDistance: Number.POSITIVE_INFINITY } });
+        v2.screenSpaceEventHandler.setInputAction((m) => measureClick(m.position), Cesium.ScreenSpaceEventType.LEFT_CLICK);
+        v2.screenSpaceEventHandler.setInputAction((m) => snapHover(m.endPosition), Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+        wireSectionMouse();
+        buildLayers();
+        log("Section window ready (wireframe).", "ok");
+      } catch (err) {
+        log(`Section window failed: ${err.message}`, "e");
+        return;
+      }
+    }
+    syncSection(true);
+  }
+  function closeSection() {
+    secWin.style.display = "none";
+    sectionOpen = false;
+    secBtn.classList.remove("on");
+    if (measureMode) setMeasureMode(null);
+  }
+  // metres per screen pixel (Cesium's fov is horizontal when the view is wider than tall, else vertical)
+  function secMpp() {
+    const W = Math.max(secBody.clientWidth, 1), H = Math.max(secBody.clientHeight, 1);
+    return secView.width / Math.max(W, H);
+  }
+  // scroll = zoom, drag = move (always square to the cut)
+  function wireSectionMouse() {
+    const c = v2.canvas;
+    c.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      secView.width = Math.min(Math.max(secView.width * (e.deltaY > 0 ? 1.15 : 1 / 1.15), 1), 3000);
+      placeSecCamera();
+    }, { passive: false });
+    let drag = null;
+    c.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY }; });
+    window.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const mpp = secMpp();
+      secView.s -= (e.clientX - drag.x) * mpp;
+      secView.z += (e.clientY - drag.y) * mpp;
+      drag = { x: e.clientX, y: e.clientY };
+      placeSecCamera();
+    });
+    window.addEventListener("pointerup", () => (drag = null));
+    new ResizeObserver(() => placeSecCamera()).observe(secBody);
+  }
+  function secAxes() {
+    const enu = cutFrame(cut);
+    const h = Cesium.Math.toRadians(cut.heading);
+    const vec = (x, y, z) => Cesium.Cartesian3.normalize(Cesium.Matrix4.multiplyByPointAsVector(enu, new Cesium.Cartesian3(x, y, z), new Cesium.Cartesian3()), new Cesium.Cartesian3());
+    return { enu, n: vec(Math.sin(h), Math.cos(h), 0), t: vec(Math.cos(h), -Math.sin(h), 0), up: vec(0, 0, 1), center: cutCenter(cut, enu) };
+  }
+  function fitSection() {
+    const { L, R } = cutWidths(cut);
+    const W = Math.max(secBody.clientWidth, 1), H = Math.max(secBody.clientHeight, 1);
+    // make L+R (plus a margin) fit across the window
+    secView.width = (L + R) * 1.12 * Math.max(W, H) / W;
+    secView.s = (R - L) / 2;
+    const h0 = Cesium.Cartographic.fromCartesian(cutCenter(cut, cutFrame(cut))).height;
+    secView.z = groundMidH !== undefined ? groundMidH - h0 : 0;
+    placeSecCamera();
+  }
+  function placeSecCamera() {
+    if (!v2 || !cut.on || !sectionOpen) return;
+    try {
+      const { n, t, up, center } = secAxes();
+      const target = Cesium.Cartesian3.clone(center);
+      Cesium.Cartesian3.add(target, Cesium.Cartesian3.multiplyByScalar(t, secView.s, new Cesium.Cartesian3()), target);
+      Cesium.Cartesian3.add(target, Cesium.Cartesian3.multiplyByScalar(up, secView.z, new Cesium.Cartesian3()), target);
+      const dest = Cesium.Cartesian3.subtract(target, Cesium.Cartesian3.multiplyByScalar(n, SEC_DIST, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+      const cam = v2.camera;
+      if (!(cam.frustum instanceof Cesium.PerspectiveFrustum)) cam.switchToPerspectiveFrustum();
+      cam.frustum.fov = 2 * Math.atan(secView.width / 2 / SEC_DIST);
+      cam.frustum.near = SEC_DIST * 0.5;
+      cam.frustum.far = SEC_DIST * 3;
+      cam.setView({ destination: dest, orientation: { direction: n, up } });
+      drawGrid();
+    } catch (err) {
+      log(`Section camera failed: ${err.message}`, "e");
+    }
+  }
+  // ORD-style grid: offsets along the bottom, elevations up the side, in feet
+  function niceStep(x) {
+    const steps = [0.5, 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000];
+    return steps.find((s) => s >= x) ?? 10000;
+  }
+  function drawGrid() {
+    if (!gridCanvas) return;
+    const W = secBody.clientWidth, H = secBody.clientHeight, dpr = window.devicePixelRatio || 1;
+    gridCanvas.width = W * dpr; gridCanvas.height = H * dpr;
+    const g = gridCanvas.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    if (!secShow.grid || !cut.on) return;
+    const FT = 3.28084;
+    const mppFt = secMpp() * FT;                       // feet per pixel
+    const h0 = Cesium.Cartographic.fromCartesian(cutCenter(cut, cutFrame(cut))).height;
+    const sMid = secView.s * FT;                       // offset (ft) at screen centre
+    const eMid = (h0 + secView.z) * FT + ELEVATION_OFFSET_FT;  // elevation (ft) at screen centre
+    const step = niceStep(GRID_TARGET_PX * mppFt);
+    const xOf = (off) => W / 2 + (off - sMid) / mppFt;
+    const yOf = (el) => H / 2 - (el - eMid) / mppFt;
+    g.font = "11px Segoe UI, system-ui, sans-serif";
+    g.lineWidth = 1;
+    const sMin = sMid - (W / 2) * mppFt, sMax = sMid + (W / 2) * mppFt;
+    const eMin = eMid - (H / 2) * mppFt, eMax = eMid + (H / 2) * mppFt;
+    const fmt = (v) => (Math.abs(v) < 1e-6 ? "0" : (step < 1 ? v.toFixed(1) : String(Math.round(v))));
+    // vertical lines = offsets
+    for (let o = Math.ceil(sMin / step) * step; o <= sMax; o += step) {
+      const x = Math.round(xOf(o)) + 0.5;
+      const zero = Math.abs(o) < step / 2;
+      g.strokeStyle = zero ? "rgba(254,188,17,.55)" : "rgba(255,255,255,.13)";
+      g.setLineDash(zero ? [6, 4] : []);
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 16); g.stroke();
+      g.fillStyle = zero ? RSH.golden : "#9FB3C8";
+      g.textAlign = "center";
+      g.fillText(fmt(o) + "'", x, H - 4);
+    }
+    g.setLineDash([]);
+    // horizontal lines = elevations
+    for (let e = Math.ceil(eMin / step) * step; e <= eMax; e += step) {
+      const y = Math.round(yOf(e)) + 0.5;
+      g.strokeStyle = "rgba(255,255,255,.13)";
+      g.beginPath(); g.moveTo(44, y); g.lineTo(W, y); g.stroke();
+      g.fillStyle = "#9FB3C8";
+      g.textAlign = "left";
+      g.fillText(fmt(e), 4, y + 4);
+    }
+    // the cut's left/right limits
+    const { L, R } = cutWidths(cut);
+    g.strokeStyle = "rgba(161,34,93,.8)";
+    [-L * FT, R * FT].forEach((o) => { const x = Math.round(xOf(o)) + 0.5; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 16); g.stroke(); });
+    g.fillStyle = "rgba(0,0,0,.6)";
+    g.fillRect(W - 210, 4, 206, 18);
+    g.fillStyle = "#9FB3C8";
+    g.textAlign = "right";
+    g.fillText(`Grid ${step}' · offset ft · elev ft` + (ELEVATION_OFFSET_FT ? "" : " (ellipsoid)"), W - 8, 17);
+  }
+  function syncSection(resetView) {
+    if (!v2 || !cut.on) return;
+    const enu = cutFrame(cut);
+    const planes = sectionPlanes(cut, secStrip);
+    if (!v2TilesCut) {
+      v2TilesCut = new Cesium.ClippingPlaneCollection({ planes: [], unionClippingRegions: true, edgeWidth: 0 });
+      v2Tiles.clippingPlanes = v2TilesCut;
+      v2GlobeCut = new Cesium.ClippingPlaneCollection({ planes: [], unionClippingRegions: true, edgeWidth: 0 });
+      v2.scene.globe.clippingPlanes = v2GlobeCut;
+    }
+    [[v2TilesCut, toTilesetFrame(v2Tiles, enu)], [v2GlobeCut, enu]].forEach(([col, m]) => {
+      col.modelMatrix = m;
+      col.removeAll();
+      planes.forEach((p) => col.add(Cesium.ClippingPlane.clone(p)));
+      col.enabled = true;
+    });
+    const { L, R } = cutWidths(cut);
+    secTitle.textContent = `Section · facing ${Math.round(cut.heading)}° · slide ${cut.offset.toFixed(1)} m · ` +
+      `L ${Math.round(L * 3.28084)}' / R ${Math.round(R * 3.28084)}' · depth ${secStrip.toFixed(1)} m`;
+    clearMeasure(true);
+    // ground line from terrain (debounced)
+    clearTimeout(groundTimer);
+    groundTimer = setTimeout(async () => {
+      try {
+        const step = Math.max(0.5, (L + R) / 400);
+        const pts = await terrainAlongCut(cut, -L, R, Math.ceil((L + R) / step));
+        const positions = pts.map((p) => p.position);
+        groundMidH = pts.reduce((best, p) => (Math.abs(p.s) < Math.abs(best.s) ? p : best), pts[0]).height;
+        if (!v2Ground) {
+          const green = Cesium.Color.fromCssColorString(RSH.green);
+          v2Ground = v2.entities.add({ polyline: { positions, width: 2, material: green, depthFailMaterial: green } });
+        } else v2Ground.polyline.positions = positions;
+        v2Ground.show = secShow.groundLine;
+        if (resetView) fitSection();
+      } catch (err) {
+        log(`Section ground line failed: ${err.message}`, "w");
+        if (resetView) fitSection();
+      }
+    }, resetView ? 0 : 150);
+    if (resetView) fitSection(); else placeSecCamera();
+  }
+  // Magnet snapping: while measuring, look around the mouse for the nearest drawn line
+  function snapHover(pos) {
+    if (!measureMode || !v2) return;
+    const now = performance.now();
+    if (now - lastSnapTime < 60) return;
+    lastSnapTime = now;
+    const hit = pickNear(v2.scene, pos, true);
+    if (hit && Cesium.defined(hit.position)) {
+      lastSnap = { screen: Cesium.Cartesian2.clone(pos), world: hit.position };
+      snapMarker.position = hit.position;
+      snapMarker.show = true;
+    } else {
+      lastSnap = undefined;
+      snapMarker.show = false;
+    }
+  }
+  function measureClick(screenPos) {
+    if (!measureMode || !cut.on) return;
+    const { enu, n, center } = secAxes();
+    const plane = Cesium.Plane.fromPointNormal(center, n);
+    let p;
+    const fresh = lastSnap && Cesium.Cartesian2.distance(lastSnap.screen, screenPos) <= PICK_RADIUS_PX * 2;
+    if (fresh) p = lastSnap.world;
+    else p = pickNear(v2.scene, screenPos, true)?.position;
+    const snapped = Cesium.defined(p);
+    if (!snapped) p = Cesium.IntersectionTests.rayPlane(v2.camera.getPickRay(screenPos), plane);
+    if (!Cesium.defined(p)) { secRes.textContent = "Couldn't read a point there — try again."; return; }
+    p = Cesium.Plane.projectPointOntoPlane(plane, p, new Cesium.Cartesian3());
+    measurePts.push(p);
+    const ptEnt = v2.entities.add({ position: p, show: secShow.measure, point: { pixelSize: 8, color: goldenColor, outlineColor: Cesium.Color.fromCssColorString(RSH.navy), outlineWidth: 2, disableDepthTestDistance: Number.POSITIVE_INFINITY } });
+    measureEntities.push(ptEnt);
+    if (measurePts.length === 1) {
+      showHint(`${MEASURE[measureMode]}: now click the second point` + (snapped ? "" : " (first point wasn't on a line — free point used)"));
+      secRes.textContent = `${MEASURE[measureMode]}: click the second point…`;
+      return;
+    }
+    const [a, b] = measurePts;
+    const inv = Cesium.Matrix4.inverseTransformation(enu, new Cesium.Matrix4());
+    const la = Cesium.Matrix4.multiplyByPoint(inv, a, new Cesium.Cartesian3());
+    const lb = Cesium.Matrix4.multiplyByPoint(inv, b, new Cesium.Cartesian3());
+    const h = Cesium.Math.toRadians(cut.heading);
+    const tx = Math.cos(h), ty = -Math.sin(h);
+    const dh = Math.abs((lb.x - la.x) * tx + (lb.y - la.y) * ty);
+    const dv = lb.z - la.z;
+    const corner = Cesium.Matrix4.multiplyByPoint(enu, new Cesium.Cartesian3(lb.x, lb.y, la.z), new Cesium.Cartesian3());
+    const ft = (m) => (m * 3.28084).toFixed(2);
+    const line = (p1, p2) => measureEntities.push(v2.entities.add({ show: secShow.measure, polyline: { positions: [p1, p2], width: 3, material: goldenColor, depthFailMaterial: goldenColor } }));
+    let text, short, labelAt;
+    if (measureMode === "h") {
+      line(a, corner);
+      text = `Horizontal ${ft(dh)} ft (${dh.toFixed(2)} m)`;
+      short = `${ft(dh)} ft`;
+      labelAt = Cesium.Cartesian3.midpoint(a, corner, new Cesium.Cartesian3());
+    } else if (measureMode === "v") {
+      line(corner, b);
+      text = `Vertical ${dv >= 0 ? "+" : ""}${ft(dv)} ft (${dv.toFixed(2)} m)`;
+      short = `${dv >= 0 ? "+" : ""}${ft(dv)} ft`;
+      labelAt = Cesium.Cartesian3.midpoint(corner, b, new Cesium.Cartesian3());
+    } else {
+      line(a, b);
+      const slopePct = dh > 1e-6 ? (dv / dh) * 100 : Infinity;
+      const ratio = Math.abs(dv) > 1e-6 ? `${(dh / Math.abs(dv)).toFixed(2)}:1 (H:V)` : "flat";
+      text = `Slope ${isFinite(slopePct) ? slopePct.toFixed(2) + "%" : "vertical"} · ${ratio}`;
+      short = isFinite(slopePct) ? `${slopePct.toFixed(1)}% · ${Math.abs(dv) > 1e-6 ? (dh / Math.abs(dv)).toFixed(1) + ":1" : "flat"}` : "vertical";
+      labelAt = Cesium.Cartesian3.midpoint(a, b, new Cesium.Cartesian3());
+    }
+    measureEntities.push(v2.entities.add({ position: labelAt, show: secShow.measure, label: { text: short,
+      font: "600 13px Segoe UI, sans-serif", fillColor: Cesium.Color.fromCssColorString(RSH.navy), showBackground: true,
+      backgroundColor: Cesium.Color.WHITE.withAlpha(0.9), pixelOffset: new Cesium.Cartesian2(0, -16), disableDepthTestDistance: Number.POSITIVE_INFINITY } }));
+    secRes.textContent = text + "  ·  click two more points to measure again";
+    showHint(`${MEASURE[measureMode]}: ${short} — click two more points, or press Esc to stop`, "");
+    log("Measure: " + text, "ok");
+    measurePts = [];
+  }
+  function clearMeasure(silent) {
+    measureEntities.splice(0).forEach((e) => v2 && v2.entities.remove(e));
+    measurePts = [];
+    if (!silent) secRes.textContent = measureMode ? `${MEASURE[measureMode]}: click the first point…` : "Cleared.";
+  }
+  log("Cross-section ready: Place cut or Cut across road, then Section window for the flat view.", "ok");
+
+  // ---------------- SECTION 9 · VIEW ----------------
+  log("Step 7/8 · View controls…");
+  const colorBtn = el("button", "Colour by file", viewRow, "b");
+  colorBtnRef = colorBtn;
+  colorBtn.title = "Each file gets its own colour (click a file's colour square in Files to change it)";
+  colorBtn.onclick = () => {
+    setColorByFile(!colorByFile);
+    log("Colour by file " + (colorByFile ? "on" : "off"));
+  };
+  // Orbit around the spot in the middle of the screen, at your current distance
+  let orbiting = false, removeOrbit, orbitState;
+  const orbitBtn = el("button", "Orbit", viewRow, "b");
+  orbitBtn.title = "Circle around whatever is in the middle of your screen";
+  function stopOrbit() {
+    if (!orbiting) return;
+    orbiting = false;
+    orbitBtn.classList.remove("on");
+    if (removeOrbit) removeOrbit();
+    viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+  }
+  orbitBtn.onclick = () => {
+    if (orbiting) { stopOrbit(); log("Orbit off"); return; }
+    const canvas = viewer.scene.canvas;
+    const mid = new Cesium.Cartesian2(canvas.clientWidth / 2, canvas.clientHeight / 2);
+    let target = viewer.scene.pickPosition(mid);
+    if (!Cesium.defined(target)) target = globe.pick(viewer.camera.getPickRay(mid), viewer.scene);
+    if (!Cesium.defined(target)) target = tileset.boundingSphere.center;
+    const range = Math.max(Cesium.Cartesian3.distance(viewer.camera.positionWC, target), 30);
+    const pitch = Math.min(Math.max(viewer.camera.pitch, Cesium.Math.toRadians(-85)), Cesium.Math.toRadians(-10));
+    orbitState = { target, range, pitch, heading: viewer.camera.heading };
+    orbiting = true;
+    orbitBtn.classList.add("on");
+    removeOrbit = viewer.clock.onTick.addEventListener(() => {
+      orbitState.heading += ORBIT_SPEED;
+      viewer.camera.lookAt(orbitState.target, new Cesium.HeadingPitchRange(orbitState.heading, orbitState.pitch, orbitState.range));
+    });
+    log(`Orbit on: circling the spot in the middle of the screen at ${Math.round(range)} m`);
+  };
+
+  // ---- hover labels ----
+  const tip = document.createElement("div");
+  tip.id = "mi4Tip";
+  viewer.container.appendChild(tip);
+  let hoverOn = true, lastHover = 0;
+  const hoverBtn = el("button", "Hover labels", viewRow, "b on");
+  hoverBtn.onclick = () => {
+    hoverOn = !hoverOn;
+    hoverBtn.classList.toggle("on", hoverOn);
+    if (!hoverOn) tip.style.display = "none";
+  };
+  viewer.screenSpaceEventHandler.setInputAction((m) => {
+    const snapMode = pickMode === "cut" || pickMode === "road1" || pickMode === "road2";
+    if ((!hoverOn && !snapMode) || (pickMode && !snapMode)) { tip.style.display = "none"; return; }
+    const now = performance.now();
+    if (now - lastHover < 80) return;   // keep it light
+    lastHover = now;
+    const box = PICK_RADIUS_PX * 2 + 1;
+    const f = snapMode ? viewer.scene.pick(m.endPosition, box, box) : viewer.scene.pick(m.endPosition);
+    if (!(f instanceof Cesium.Cesium3DTileFeature)) { tip.style.display = "none"; return; }
+    const file = fileOf(f);
+    const lvl = catLabel.get(norm(f.getProperty("category")));
+    tip.textContent = (snapMode ? "Click: " : "") + ([file?.label, lvl].filter(Boolean).join(" › ") || "Model element");
+    tip.style.left = m.endPosition.x + 14 + "px";
+    tip.style.top = m.endPosition.y + 14 + "px";
+    tip.style.display = "block";
+  }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+  // ---- view buttons ----
+  function flyToView(v) {
+    stopOrbit();
+    viewer.camera.flyTo({
+      destination: new Cesium.Cartesian3(v.destination[0], v.destination[1], v.destination[2]),
+      orientation: { heading: v.hpr[0], pitch: v.hpr[1], roll: v.hpr[2] },
+      duration: 2,
+    });
+    log(`Flying to ${v.name}`);
+  }
+  const overview = el("button", "Overview", viewsRow, "b");
+  overview.title = "Fly back to the whole project";
+  overview.onclick = () => {
+    stopOrbit();
+    aboveView = null;
+    updateUnderBtn();
+    viewer.scene.screenSpaceCameraController.enableCollisionDetection = true;
+    viewer.zoomTo(tileset);
+    log("Overview");
+  };
+  const copyBtn = el("button", "+ Copy this view", viewsRow, "b");
+  function addViewButton(v) {
+    const b = document.createElement("button");
+    b.className = "b";
+    b.textContent = v.name;
+    b.onclick = () => flyToView(v);
+    viewsRow.insertBefore(b, copyBtn);
+  }
+  SAVED_VIEWS.forEach((v) => {
+    if (Array.isArray(v?.destination) && v.destination.length === 3 && Array.isArray(v?.hpr) && v.hpr.length === 3) addViewButton(v);
+    else log(`Skipped a saved view with missing numbers: ${JSON.stringify(v)}`, "w");
+  });
+  let viewCount = SAVED_VIEWS.length;
+  copyBtn.onclick = async () => {
+    const c = viewer.camera;
+    const p = c.positionWC;
+    const v = {
+      name: `View ${++viewCount}`,
+      destination: [p.x, p.y, p.z].map((n) => +n.toFixed(3)),
+      hpr: [c.heading, c.pitch, c.roll].map((n) => +n.toFixed(6)),
+    };
+    addViewButton(v);
+    const line = `  { name: "${v.name}", destination: [${v.destination.join(", ")}], hpr: [${v.hpr.join(", ")}] },`;
+    try {
+      await navigator.clipboard.writeText(line);
+      log(`${v.name} saved for this session and copied. Paste it into SAVED_VIEWS (Section 1) and rename it to keep it.`, "ok");
+    } catch {
+      log(`${v.name} saved for this session. Copy this line from the log into SAVED_VIEWS to keep it:`, "w");
+    }
+    log(line);
+  };
+
+  // ---------------- SECTION 10 · WASD WALKING + Esc ----------------
+  log("Step 8/8 · Keyboard walking…");
+  const down = new Set();
+  let fastKey = false;
+  const typing = () => ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName);
+  document.addEventListener("keydown", (e) => {
+    if (typing()) return;
+    if (e.key === "Shift") fastKey = true;
+    if (e.key === "Escape") {
+      if (pickMode) { setPickMode(null); updateUnderBtn(); refreshLabels(); log("Cancelled"); }
+      if (measureMode) setMeasureMode(null);
+    }
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (["w", "a", "s", "d", "q", "e", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(k)) {
+      down.add(k);
+      e.preventDefault();
+      stopOrbit();
+    }
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.key === "Shift") fastKey = false;
+    down.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+  });
+  window.addEventListener("blur", () => down.clear());
+  let last = performance.now();
+  viewer.clock.onTick.addEventListener(() => {
+    const now = performance.now();
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    if (!down.size) return;
+    const step = WALK_SPEED_MPS * (fastKey ? 5 : 1) * dt;
+    const turn = Cesium.Math.toRadians(LOOK_SPEED_DEG) * dt;
+    const cam = viewer.camera;
+    if (down.has("w")) cam.moveForward(step);
+    if (down.has("s")) cam.moveBackward(step);
+    if (down.has("a")) cam.moveLeft(step);
+    if (down.has("d")) cam.moveRight(step);
+    if (down.has("e")) cam.moveUp(step);
+    if (down.has("q")) cam.moveDown(step);
+    if (down.has("ArrowLeft")) cam.lookLeft(turn);
+    if (down.has("ArrowRight")) cam.lookRight(turn);
+    if (down.has("ArrowUp")) cam.lookUp(turn);
+    if (down.has("ArrowDown")) cam.lookDown(turn);
+  });
+  log("All set. Save with Share (or download) in Sandcastle. Esc cancels any tool waiting for a click.", "ok");
+} catch (err) {
+  log("STOPPED: " + err.message, "e");
+}
+
+// ---------------- HELPERS · style ----------------
+function makeStyle(isHidden) {
+  const style = new Cesium.Cesium3DTileStyle();
+  style.show = {
+    evaluate(feature) {
+      const c = norm(feature.getProperty("category"));
+      if (c !== undefined && hiddenCats.has(c)) return false;
+      return !(isHidden && isHidden(feature));
+    },
+  };
+  style.color = {
+    evaluateColor(feature, result) {
+      const id = Cesium.IonAssetElementService.getElementId(feature);
+      if (selectedElementId !== undefined && id === selectedElementId) return Cesium.Color.clone(goldenColor, result);
+      if (colorByFile) {
+        const f = fileOf(feature);
+        if (f) return Cesium.Color.clone(f.cesiumColor, result);
+      }
+      return Cesium.Color.clone(Cesium.Color.WHITE, result);
+    },
+  };
+  return style;
+}
+function refresh() {
+  styledTilesets.forEach((t) => t.makeStyleDirty());
+}
+function setClipButtons() {
+  if (!clipBtnRef || !clipCollection) return;
+  clipBtnRef.textContent = "Clip ground: " + (clipCollection.enabled ? "on" : "off");
+  clipBtnRef.classList.toggle("on", clipCollection.enabled);
+}
+
+// ---------------- HELPERS · wider pick ----------------
+// Clicks first try the exact pixel. If that misses the model, it checks a small
+// area around the mouse (Scene.pick with width/height) and then rings of points
+// out to PICK_RADIUS_PX, so thin lines like alignments are easy to hit.
+function pickNear(scene, pos, anyObject) {
+  const isModel = (f) => (anyObject ? Cesium.defined(f) : f instanceof Cesium.Cesium3DTileFeature);
+  const exact = scene.pick(pos);
+  if (isModel(exact)) {
+    const p = scene.pickPosition(pos);
+    if (Cesium.defined(p)) return { feature: exact, position: p };
+  }
+  const box = PICK_RADIUS_PX * 2 + 1;
+  if (isModel(scene.pick(pos, box, box))) {
+    for (let r = 2; r <= PICK_RADIUS_PX; r += 2) {
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2;
+        const q = new Cesium.Cartesian2(pos.x + r * Math.cos(a), pos.y + r * Math.sin(a));
+        const f = scene.pick(q);
+        if (isModel(f)) {
+          const p = scene.pickPosition(q);
+          if (Cesium.defined(p)) return { feature: f, position: p };
+        }
+      }
+    }
+  }
+  const p = scene.pickPosition(pos);
+  return Cesium.defined(p) ? { feature: exact, position: p } : undefined;
+}
+
+// ---------------- HELPERS · footprint holes ("bridges") ----------------
+// Joins each hole to the outer edge with a zero-width bridge so one outline
+// excludes the hole. Holes are wound the opposite way to the outer edge, so the
+// result is correct for both even-odd and non-zero fill rules.
+function bridgeHoles(outer, holes) {
+  const origin = outer[0];
+  const inv = Cesium.Matrix4.inverseTransformation(Cesium.Transforms.eastNorthUpToFixedFrame(origin), new Cesium.Matrix4());
+  const to2d = (p) => { const q = Cesium.Matrix4.multiplyByPoint(inv, p, new Cesium.Cartesian3()); return { x: q.x, y: q.y }; };
+  const area = (pts) => { let a = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a += p.x * q.y - q.x * p.y; } return a / 2; };
+  let ring = outer.map((p) => ({ p, q: to2d(p) }));
+  if (area(ring.map((v) => v.q)) < 0) ring.reverse();               // outer counter-clockwise
+  const hs = holes.map((h) => {
+    let r = h.map((p) => ({ p, q: to2d(p) }));
+    if (area(r.map((v) => v.q)) > 0) r.reverse();                   // holes clockwise
+    let k = 0;
+    r.forEach((v, i) => { if (v.q.x > r[k].q.x) k = i; });          // rightmost hole point
+    return { r, k };
+  });
+  hs.sort((a, b) => b.r[b.k].q.x - a.r[a.k].q.x);
+  for (const { r, k } of hs) {
+    const hp = r[k].q;
+    let best = 0, bestD = Infinity;
+    for (let j = 0; j < ring.length; j++) {
+      const dx = ring[j].q.x - hp.x, dy = ring[j].q.y - hp.y, d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = j; }
+    }
+    const loop = [...r.slice(k), ...r.slice(0, k), r[k]];          // around the hole, back to start
+    ring = [...ring.slice(0, best + 1), ...loop, ring[best], ...ring.slice(best + 1)];
+  }
+  return ring.map((v) => v.p);
+}
+
+// ---------------- HELPERS · cut geometry ----------------
+function cutFrame(cut) {
+  return Cesium.Transforms.eastNorthUpToFixedFrame(cut.point);
+}
+function cutNormal(cut) {
+  const h = Cesium.Math.toRadians(cut.heading);   // 0 = facing north, 90 = facing east
+  return new Cesium.Cartesian3(Math.sin(h), Math.cos(h), 0);
+}
+function cutCenter(cut, enu) {
+  const n = cutNormal(cut);
+  return Cesium.Matrix4.multiplyByPoint(enu, new Cesium.Cartesian3(n.x * cut.offset, n.y * cut.offset, 0), new Cesium.Cartesian3());
+}
+function buildPlanes(cut, slab) {
+  const n = cutNormal(cut);
+  if (!slab) return [new Cesium.ClippingPlane(n, -cut.offset)];     // keeps what's beyond the cut
+  const half = cut.thickness / 2;
+  return [
+    new Cesium.ClippingPlane(n, -(cut.offset - half)),
+    new Cesium.ClippingPlane(Cesium.Cartesian3.negate(n, new Cesium.Cartesian3()), cut.offset + half),
+  ];
+}
+function newPlaneCollection(cut, slab) {
+  return new Cesium.ClippingPlaneCollection({
+    planes: buildPlanes(cut, slab), unionClippingRegions: true, edgeWidth: 2.0, edgeColor: goldenColor,
+  });
+}
+function updatePlaneCollection(col, modelMatrix, cut, slab) {
+  col.modelMatrix = modelMatrix;
+  col.removeAll();
+  buildPlanes(cut, slab).forEach((p) => col.add(p));
+  col.enabled = true;
+}
+function toTilesetFrame(ts, enu) {
+  const origin = ts.clippingPlanesOriginMatrix ?? Cesium.Transforms.eastNorthUpToFixedFrame(ts.boundingSphere.center);
+  return Cesium.Matrix4.multiply(Cesium.Matrix4.inverse(origin, new Cesium.Matrix4()), enu, new Cesium.Matrix4());
+}
+// Ground line along the cut + a wall down SOIL_DEPTH_METERS (soil fill)
+async function soilProfile(v, cut) {
+  const { L, R } = cutWidths(cut);
+  const pts = await terrainAlongCut(cut, -L, R, 100);
+  return {
+    positions: pts.map((p) => p.position),
+    maxH: pts.map((p) => p.height - 0.05),            // just under the ground line
+    minH: pts.map((p) => p.height - SOIL_DEPTH_METERS),
+  };
+}
+// Ground heights along the cut line, from s = fromS to toS metres (s = along the cut, + = right)
+async function terrainAlongCut(cut, fromS, toS, samples) {
+  const enu = cutFrame(cut);
+  const n = cutNormal(cut);
+  const h = Cesium.Math.toRadians(cut.heading);
+  const tx = Math.cos(h), ty = -Math.sin(h);
+  const ss = [], carts = [];
+  for (let i = 0; i <= samples; i++) {
+    const s = fromS + ((toS - fromS) * i) / samples;
+    const w = Cesium.Matrix4.multiplyByPoint(enu, new Cesium.Cartesian3(n.x * cut.offset + tx * s, n.y * cut.offset + ty * s, 0), new Cesium.Cartesian3());
+    const c = Cesium.Cartographic.fromCartesian(w);
+    ss.push(s);
+    carts.push(new Cesium.Cartographic(c.longitude, c.latitude));
+  }
+  const sampled = await Cesium.sampleTerrainMostDetailed(viewer.terrainProvider, carts);
+  return sampled.map((c, i) => {
+    const gh = Cesium.defined(c.height) ? c.height : 0;
+    return { s: ss[i], height: gh, position: Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, gh) };
+  });
+}
+function cutWidths(cut) {
+  return { L: cut.leftFt / 3.28084, R: cut.rightFt / 3.28084 };
+}
+// Section window planes: a strip of `depth` metres around the cut, limited to the Left/Right widths
+function sectionPlanes(cut, depth) {
+  const n = cutNormal(cut);
+  const h = Cesium.Math.toRadians(cut.heading);
+  const t = new Cesium.Cartesian3(Math.cos(h), -Math.sin(h), 0);
+  const { L, R } = cutWidths(cut);
+  const half = depth / 2;
+  return [
+    new Cesium.ClippingPlane(n, -(cut.offset - half)),
+    new Cesium.ClippingPlane(Cesium.Cartesian3.negate(n, new Cesium.Cartesian3()), cut.offset + half),
+    new Cesium.ClippingPlane(t, L),
+    new Cesium.ClippingPlane(Cesium.Cartesian3.negate(t, new Cesium.Cartesian3()), R),
+  ];
+}
+
+// ---------------- HELPERS · model tree → files panel ----------------
+async function children(node) {
+  try {
+    const r = await elementService.getElementTreeChildren(node ? { nodeKey: node.key } : undefined);
+    return r?.nodes ?? [];
+  } catch (err) {
+    const why = err?.response ? JSON.stringify(err.response) : err?.message;
+    log(`Couldn't open "${node?.label ?? "root"}": ${why}`, "e");
+    return [];
+  }
+}
+
+async function buildFileTree() {
+  const roots = await children();
+  log("Tree top: " + (roots.map((n) => `${n.label} [${n.kind}]`).join(", ") || "(empty)"));
+  if (!roots.length) {
+    log("Model tree came back empty. Falling back to a flat level list.", "w");
+    return buildFlatLevels();
+  }
+  let candidates = roots;
+  if (roots.length === 1 && roots[0].kind === "subject" && roots[0].hasChildren) {
+    candidates = await children(roots[0]);
+    log(`Under "${roots[0].label}": ` + candidates.map((n) => `${n.label} [${n.kind}]`).join(", "));
+  }
+  const fileNodes = candidates.filter((n) => n.kind === "subject" || n.kind === "model");
+  if (!fileNodes.length) {
+    log("No file nodes found in the tree. Falling back to a flat level list.", "w");
+    return buildFlatLevels();
+  }
+  // read every file's levels in parallel (faster first load)
+  const results = await Promise.all(fileNodes.map(async (node) => {
+    const levelMap = new Map();
+    const addCats = (list) => list.filter((n) => n.kind === "category").forEach((n) => {
+      const id = norm(n.id);
+      if (!levelMap.has(id)) levelMap.set(id, n.label);
+      if (!catLabel.has(id)) catLabel.set(id, n.label);
+    });
+    const kids = node.hasChildren ? await children(node) : [];
+    addCats(kids);
+    for (const k of kids.filter((n) => n.kind === "model" || n.kind === "subject")) {
+      if (!k.hasChildren) continue;
+      for (const g of await children(k)) {
+        if (g.kind === "category") addCats([g]);
+        else if (g.kind === "model" && g.hasChildren) addCats(await children(g));
+      }
+    }
+    return { node, levelMap };
+  }));
+  let shared = 0;
+  results.forEach(({ node, levelMap }, i) => {
+    const color = FILE_COLORS[i % FILE_COLORS.length];
+    const file = { label: node.label, color, cesiumColor: Cesium.Color.fromCssColorString(color), subjectId: norm(node.id), levels: [] };
+    file.levels = [...levelMap].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label));
+    file.levels.forEach((lv) => { if (catToFile.has(lv.id)) shared++; catToFile.set(lv.id, file); });
+    files.push(file);
+    log(`${file.label}: ${file.levels.length} level(s)`, file.levels.length ? "ok" : "w");
+    renderFile(file);
+  });
+  if (shared) log(`${shared} level id(s) are shared between files — Colour by file uses the last file for those.`, "w");
+  wireSearch();
+}
+
+function renderFile(file) {
+  const d = el("details", undefined, fileList);
+  file.details = d;
+  const s = el("summary", undefined, d);
+  el("span", "▶", s, "arw");
+  const cb = el("input", undefined, s);
+  cb.type = "checkbox"; cb.checked = true;
+  cb.onclick = (e) => e.stopPropagation();
+  cb.onchange = () => setFile(file, cb.checked);
+  file.cb = cb;
+  // colour square: click to pick this file's colour
+  const sw = el("span", undefined, s, "sw");
+  sw.style.background = file.color;
+  sw.title = "Click to choose this file's colour";
+  file.swatch = sw;
+  const picker = document.createElement("input");
+  picker.type = "color";
+  picker.value = file.color.length === 7 ? file.color : "#215EAC";
+  picker.style.cssText = "position:absolute;opacity:0;width:0;height:0;pointer-events:none";
+  s.appendChild(picker);
+  sw.onclick = (e) => { e.preventDefault(); e.stopPropagation(); picker.click(); };
+  picker.onclick = (e) => e.stopPropagation();
+  picker.oninput = () => {
+    file.color = picker.value;
+    file.cesiumColor = Cesium.Color.fromCssColorString(picker.value);
+    sw.style.background = picker.value;
+    if (!colorByFile) setColorByFile(true); else refresh();
+  };
+  picker.onchange = () => log(`${file.label} colour set to ${picker.value}`);
+  el("span", file.label, s);
+  el("span", `${file.levels.length} levels`, s, "cnt");
+  file.levels.forEach((lv) => {
+    const row = el("label", undefined, d, "lv");
+    const lcb = el("input", undefined, row);
+    lcb.type = "checkbox"; lcb.checked = true;
+    el("span", lv.label, row);
+    row.dataset.name = lv.label.toLowerCase();
+    lv.row = row; lv.cb = lcb;
+    lcb.addEventListener("click", (e) => {
+      if (e.ctrlKey) {               // Ctrl+click = show only this level in this file
+        e.preventDefault();
+        const solo = file.levels.every((o) => o === lv || !o.cb.checked) && lv.cb.checked;
+        file.levels.forEach((o) => setLevel(o, solo || o === lv));
+        log(solo ? `${file.label}: all levels back on` : `${file.label}: only ${lv.label}`);
+      } else setLevel(lv, lcb.checked);
+      file.cb.checked = file.levels.some((o) => o.cb.checked);
+      refresh();
+    });
+  });
+}
+
+// whole file on/off = all of its levels on/off (level ids are unique per file)
+function setFile(file, visible) {
+  file.levels.forEach((lv) => setLevel(lv, visible));
+  file.cb.checked = visible;
+  log(`${file.label} ${visible ? "on" : "off"}`);
+  refresh();
+}
+function setLevel(lv, visible) {
+  visible ? hiddenCats.delete(lv.id) : hiddenCats.add(lv.id);
+  lv.cb.checked = visible;
+}
+function clearHits() {
+  fileList.querySelectorAll(".lv.hit").forEach((r) => r.classList.remove("hit"));
+}
+function revealInPanel(file, catId) {
+  if (!file) return;
+  file.details.open = true;
+  const lv = file.levels.find((l) => l.id === catId);
+  const target = lv?.row ?? file.details;
+  if (lv) lv.row.classList.add("hit");
+  target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+function wireSearch() {
+  search.oninput = () => {
+    const q = search.value.toLowerCase();
+    files.forEach((f) => {
+      let any = false;
+      f.levels.forEach((lv) => {
+        const show = !q || lv.row.dataset.name.includes(q);
+        lv.row.style.display = show ? "" : "none";
+        any = any || (q && show);
+      });
+      if (q) f.details.open = any;
+    });
+  };
+}
+function buildFlatLevels() {
+  const file = { label: "All levels", color: RSH.blue, cesiumColor: Cesium.Color.fromCssColorString(RSH.blue), levels: [] };
+  file.levels = [...catLabel].map(([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label));
+  file.levels.forEach((lv) => catToFile.set(lv.id, file));
+  files.push(file);
+  renderFile(file);
+  wireSearch();
+  log(`Flat list: ${file.levels.length} levels.`, file.levels.length ? "ok" : "w");
+}
+
+  </script>
+</body>
+</html>
